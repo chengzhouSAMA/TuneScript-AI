@@ -1,0 +1,17 @@
+# TuneScript AI 依赖(Python 3.9, Windows)
+basic-pitch>=0.4.0
+demucs>=4.0.1
+torch>=2.0.0
+torchaudio
+onnxruntime
+librosa
+pretty_midi
+mido
+soundfile
+numpy
+scipy
+pycryptodome
+# 和弦增强(ByteDance 钢琴转录)
+piano-transcription-inference>=0.0.6
+# 整曲 MT3(可选)
+# mt3-infer
