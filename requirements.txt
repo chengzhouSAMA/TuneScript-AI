@@ -11,7 +11,3 @@ soundfile
 numpy
 scipy
 pycryptodome
-# 和弦增强(ByteDance 钢琴转录)
-piano-transcription-inference>=0.0.6
-# 整曲 MT3(可选)
-# mt3-infer
