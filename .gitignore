@@ -1,0 +1,27 @@
+# 构建产物
+build/
+dist/
+*.spec.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 模型权重(体积大,不入库)
+*.pth
+*.onnx
+piano_btd/
+mt3/
+.mt3_checkpoints/
+
+# 音频/输出
+*.wav
+*.mid
+*.mp3
+*.flac
+*.ncm
+*_五线谱.pdf
+*_大谱表.xml
