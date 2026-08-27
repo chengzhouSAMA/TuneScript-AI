@@ -1,4 +1,4 @@
-# TuneScript AI 依赖(Python 3.9, Windows)
+# TuneScript AI V0.3 依赖(Python 3.9, Windows)
 basic-pitch>=0.4.0
 demucs>=4.0.1
 torch>=2.0.0
@@ -11,3 +11,5 @@ soundfile
 numpy
 scipy
 pycryptodome
+# 和弦增强(ByteDance 钢琴转录)
+piano-transcription-inference>=0.0.6
