@@ -6,6 +6,8 @@
           -> [Demucs 四轨分离: 人声/鼓/贝斯/其他(与识音 shiyin.notalabs.cn
               同原理：深度学习频谱掩码源分离)]
           -> Basic Pitch (ONNX, CPU) 逐轨识别音符
+          -> (可选) MT3 智能识别增强：多声部模型直接识别全曲和弦，
+             能还原 Basic Pitch 做不出的完整和弦/多声部
           -> 融合修改(所有声部全部用上)：人声=主旋律(右)，人声空档
              (前奏/间奏/尾奏)用和声轨最高音线补旋律线；贝斯=左手低音线；
              和声轨抽稀后进左手(每0.35s一个和声点)；鼓点与贝斯对齐者
@@ -111,6 +113,99 @@ def find_model():
         if c and os.path.isfile(c):
             return c
     return None
+
+
+def find_mt3_checkpoint():
+    """定位 MT3 智能识别权重 (mr_mt3/mt3.pth)。
+
+    打包后权重放在 exe 同目录的 mt3/mt3.pth(外挂,便于更新);
+    源码运行则用 .mt3_checkpoints/mr_mt3/mt3.pth。找不到返回 None,
+    表示“AI 智能识别增强”不可用,调用方自动退回 Basic Pitch。
+    """
+    candidates = [
+        os.path.join(app_dir(), "mt3", "mr_mt3", "mt3.pth"),
+        os.path.join(app_dir(), "mt3", "mt3.pth"),
+        os.path.join(bundle_dir(), "mt3", "mt3.pth"),
+        os.path.join(os.getcwd(), ".mt3_checkpoints", "mr_mt3", "mt3.pth"),
+        os.path.join(os.path.expanduser("~"), ".mt3_checkpoints", "mr_mt3", "mt3.pth"),
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+# 模块级缓存：MT3 模型约 176MB，避免每个文件重复加载
+_MT3_MODEL_CACHE = {"path": None, "model": None}
+
+
+def _mt3_model(checkpoint):
+    """懒加载 MT3 模型(全局缓存)。失败抛异常,由调用方回退。"""
+    if _MT3_MODEL_CACHE["model"] is not None and _MT3_MODEL_CACHE["path"] == checkpoint:
+        return _MT3_MODEL_CACHE["model"]
+    from mt3_infer import load_model
+    # 权重由 find_mt3_checkpoint 指定，冻结打包后不要联网下载
+    model = load_model("mr_mt3", device="cpu", checkpoint_path=checkpoint,
+                       auto_download=False)
+    _MT3_MODEL_CACHE["path"] = checkpoint
+    _MT3_MODEL_CACHE["model"] = model
+    return model
+
+
+# 模块级缓存：ByteDance 钢琴转录(CRNN，约 165MB)——比 MT3 快约 6 倍，
+# 专用于钢琴/和弦识别，适合识别伴奏轨(其他轨)的和弦部分
+_BTD_MODEL_CACHE = {"path": None, "model": None}
+
+
+def find_btd_checkpoint():
+    """定位 ByteDance 钢琴转录权重 (note_F1=0.9677_pedal_F1=0.9186.pth)。
+
+    打包后权重放在 exe 同目录的 piano_btd/ 下(外挂,便于更新);
+    源码运行则用默认的 ~/piano_transcription_inference_data/。找不到返回 None。
+    """
+    fname = "note_F1=0.9677_pedal_F1=0.9186.pth"
+    candidates = [
+        os.path.join(app_dir(), "piano_btd", fname),
+        os.path.join(bundle_dir(), "piano_btd", fname),
+        os.path.join(os.path.expanduser("~"), "piano_transcription_inference_data", fname),
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.path.getsize(c) > 1.6e8:
+            return c
+    return None
+
+
+def _btd_model(checkpoint=None):
+    """懒加载 ByteDance 钢琴转录模型(全局缓存，CPU)。失败抛异常。"""
+    if _BTD_MODEL_CACHE["model"] is not None and _BTD_MODEL_CACHE["path"] == checkpoint:
+        return _BTD_MODEL_CACHE["model"]
+    from piano_transcription_inference import PianoTranscription
+    model = PianoTranscription(device="cpu", checkpoint_path=checkpoint)
+    _BTD_MODEL_CACHE["path"] = checkpoint
+    _BTD_MODEL_CACHE["model"] = model
+    return model
+
+
+def _btd_track_notes(wav_path, model, progress, label):
+    """用 ByteDance 钢琴转录模型识别一个分离轨，返回 (start,end,pitch,vel)。
+
+    该模型是 CNN(Onsets & Frames 改进)，CPU 上接近实时(约 6 倍快于 MT3)，
+    专为钢琴/和弦设计——适合识别伴奏轨的完整和弦(多音高)。
+    返回 (start,end,pitch,velocity)，时间单位秒。
+    """
+    import librosa
+    from piano_transcription_inference import sample_rate
+    y, sr = librosa.load(wav_path, sr=sample_rate, mono=True)
+    progress(f"AI 正在识别{label}(和弦增强)…")
+    d = model.transcribe(y, None)
+    notes = []
+    for ev in d.get("est_note_events", []):
+        s = float(ev["onset_time"])
+        e = float(ev["offset_time"])
+        if e > s + 1e-4:
+            notes.append((s, e, int(ev["midi_note"]), int(ev["velocity"])))
+    notes.sort(key=lambda x: (x[0], x[2]))
+    return notes
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +439,246 @@ def transcribe_to_midi(wav_path, model_path, progress):
     return out, left, right, tempo
 
 
+def _mido_to_notes(midi, tempo_bpm=120.0):
+    """把 MT3 输出的 mido.MidiFile 解析成 (start, end, pitch, velocity) 列表。
+
+    时间单位是秒：ticks -> beats -> 秒(用 ticks_per_beat 与 BPM 换算)。
+    单轨多音高(polyphonic)事件被还原成独立的音符起止，供后续分手用。
+    """
+    tpb = midi.ticks_per_beat or 480
+    sec_per_tick = 60.0 / (tempo_bpm * tpb)
+    notes = []
+    for track in midi.tracks:
+        abs_tick = 0
+        on = {}  # note -> start_tick
+        for msg in track:
+            abs_tick += msg.time
+            if msg.type == "note_on" and msg.velocity > 0:
+                on.setdefault(msg.note, abs_tick)
+            elif msg.type == "note_off":
+                st = on.pop(msg.note, None)
+                if st is not None:
+                    s = st * sec_per_tick
+                    e = abs_tick * sec_per_tick
+                    if e > s + 1e-4:
+                        notes.append((s, e, msg.note, 80))
+    notes.sort(key=lambda x: (x[0], x[2]))
+    return notes
+
+
+def transcribe_mt3(wav_path, checkpoint, progress, model_path=None, max_sec=90.0):
+    """MT3 智能识别增强引擎：整个混音 -> polyphonic MIDI -> 可弹钢琴谱。
+
+    相对 Basic Pitch 的优势：能识别完整和弦/多声部(单音色单音高模型
+    做不到)，对伴奏/多乐器乐曲还原更丰富。代价是慢(CPU 约 6 倍实时)。
+
+    限时优化：MT3 只识别前 max_sec 秒(默认 90 秒)，超出部分用 Basic
+    Pitch 补全(model_path 提供时)——长歌提速 3~4 倍，MT3 耗时封顶。
+
+    返回 (midi_data, left, right, tempo)；失败抛异常，由调用方回退。
+    """
+    import librosa
+    from mt3_infer import load_model
+
+    progress("加载 MT3 智能识别引擎(约 176MB 模型，稍候)…")
+    model = _mt3_model(checkpoint)
+
+    y, sr = librosa.load(wav_path, sr=16000, mono=True)
+    truncated = len(y) / sr > max_sec
+    if truncated:
+        y = y[: int(max_sec * sr)]
+        progress(f"MT3 限时识别前 {max_sec:.0f} 秒(长歌提速)，后段用 Basic Pitch 补全…")
+    else:
+        progress("MT3 正在识别全曲和弦与声部(CPU 较慢，请耐心等待)…")
+    midi = model.transcribe(y, sr=sr)
+
+    notes = _mido_to_notes(midi)
+    if len(notes) < 10:
+        raise RuntimeError("MT3 未识别出足够音符，退回 Basic Pitch。")
+    progress(f"MT3 识别出 {len(notes)} 个音符，正在整理为可弹钢琴谱…")
+
+    if truncated and model_path:
+        from basic_pitch.inference import Model as BpModel
+        bp_model = BpModel(model_path)
+        bp_notes = transcribe_notes(wav_path, bp_model, progress,
+                                    label="后段音符", min_len=127)
+        notes = notes + [n for n in bp_notes if n[0] >= max_sec]
+
+    melody, accomp = _split_melody_accomp(notes)
+    out, left, right = fuse_to_piano(melody, accomp)
+    tempo = _estimate_tempo_from_midi_time(midi, notes)
+    return out, left, right, tempo
+
+
+def _mt3_track_notes(wav_path, model, progress, label, max_sec=None):
+    """对单个分离轨用 MT3 转录，返回 polyphonic 音符 (start,end,pitch,vel)。
+
+    MT3 是单轨多音高模型：同一时刻可能输出多个音高(旋律+泛音+内声部)。
+    分离轨(尤其人声/贝斯)相对干净，多音高主要来自泛音/轻微串音，
+    交由调用方按“线”或“和弦”整理。
+
+    max_sec 非 None 时只识别前 max_sec 秒(MT3 CPU 慢，限时可大幅提速)；
+    返回 (notes, truncated)，truncated=True 表示音频超过限时被截断，
+    调用方需用 Basic Pitch 补 90 秒之后的部分。
+    """
+    import librosa
+    y, sr = librosa.load(wav_path, sr=16000, mono=True)
+    truncated = False
+    if max_sec is not None and len(y) / sr > max_sec:
+        y = y[: int(max_sec * sr)]
+        truncated = True
+        progress(f"MT3 限时识别{label}前 {max_sec:.0f} 秒(长歌提速)…")
+    else:
+        progress(f"MT3 正在识别{label}…")
+    midi = model.transcribe(y, sr=sr)
+    return _mido_to_notes(midi), truncated
+
+
+def _bass_line(notes, window=0.12):
+    """从 MT3 多音高里提取最低音线(贝斯轨用)。
+
+    每个起音簇取最低音(贝斯根音优先)，聚成一条低音线。
+    """
+    if not notes:
+        return []
+    notes = sorted(notes, key=lambda x: x[0])
+    line = []
+    i = 0
+    n = len(notes)
+    while i < n:
+        t0 = notes[i][0]
+        j = i
+        cluster = []
+        while j < n and notes[j][0] <= t0 + window:
+            cluster.append(notes[j])
+            j += 1
+        i = j
+        low = min(cluster, key=lambda x: x[2])
+        line.append((low[0], low[1], low[2], low[3]))
+    return line
+
+
+def _melody_line(notes, window=0.12):
+    """从 MT3 多音高里提取最高音线(人声/主旋律轨用)。
+
+    与 _split_melody_accomp 同原理：起音簇取最高音作旋律。
+    """
+    if not notes:
+        return []
+    notes = sorted(notes, key=lambda x: x[0])
+    line = []
+    i = 0
+    n = len(notes)
+    while i < n:
+        t0 = notes[i][0]
+        j = i
+        cluster = []
+        while j < n and notes[j][0] <= t0 + window:
+            cluster.append(notes[j])
+            j += 1
+        i = j
+        top = max(cluster, key=lambda x: x[2])
+        line.append((top[0], top[1], top[2], top[3]))
+    return line
+
+
+def transcribe_stems_enhanced(stems, model_path, progress):
+    """分离轨 + 和弦增强(重点：人声→和弦→贝斯)：
+
+    1) 先 Demucs 分成 人声/鼓/贝斯/其他 四轨；
+    2) 识别分工(按重要性)：
+       - 人声轨：Basic Pitch(人声是单音旋律，Basic Pitch 快且准)——重点①
+       - 其他轨(和弦/键盘/弦乐)：ByteDance 钢琴转录模型(CRNN，CPU 接近
+         实时，比 MT3 快约 6 倍，专为和弦/多音高设计)——重点②
+       - 贝斯轨：Basic Pitch(贝斯不重要，快速带过)
+       - 鼓轨：Basic Pitch(只用于对齐强化贝斯起音)
+    3) 逐轨整理：人声轨取最高音线=主旋律(右)，贝斯轨取最低音线=左手低音，
+       和弦轨保留多音高进左手伴奏(抽稀)，鼓轨与贝斯对齐强化起音；
+    4) 复用通用融合(fuse_to_piano)：碎音合并/legato/伴奏释放/力度分层/踏板。
+
+    人声轨音符过少(纯器乐/分离失败)返回 None，调用方回退常规流程。
+    返回 (midi_data, left, right)。
+    """
+    from basic_pitch.inference import Model as BpModel
+    try:
+        bp_model = BpModel(model_path)
+    except Exception:
+        bp_model = None
+
+    # 人声用 Basic Pitch(快)；人声是单旋律，不需要多声部模型
+    vocal_notes = transcribe_notes(stems["vocals"], bp_model, progress,
+                                   label="人声旋律", min_len=60)
+    if len(vocal_notes) < 10:
+        progress("分轨人声音符过少，退回常规流程…")
+        return None
+
+    # 和弦(其他轨)用 ByteDance 钢琴转录模型——多音高和弦识别(重点增强)
+    btd_ckpt = find_btd_checkpoint()
+    if btd_ckpt:
+        btd_model = _btd_model(btd_ckpt)
+        other_notes = _btd_track_notes(stems["other"], btd_model, progress, "和弦伴奏")
+    else:
+        progress("未找到和弦增强模型，和弦轨用快速引擎…")
+        other_notes = transcribe_notes(stems["other"], bp_model, progress,
+                                       label="和声伴奏")
+
+    # 贝斯完全不需要(不识别、不使用)；鼓也不使用(无贝斯可对齐)
+    # 左手伴奏 = 多和声音(其他轨)，滤高音幻觉、抑长铺垫后稀疏保留
+
+    progress("正在融合分轨结果并整理成可弹钢琴谱…")
+    gaps = _find_vocal_gaps(vocal_notes, other_notes)
+
+    def _in_gap(s):
+        return any(gs <= s < ge for gs, ge in gaps)
+
+    def _in_long_gap(s):
+        # 只有真正的长器乐段(>2.5s 前奏/尾奏)才丢弃人声；
+        # 短空档内的人声保留(可能是识别漏音)，避免旋律突然消失
+        return any(gs <= s < ge and (ge - gs) > 2.5 for gs, ge in gaps)
+
+    # 人声轨取最高音线=主旋律；仅长器乐段内丢弃人声改用器乐最高音线
+    vocal_line = _melody_line(vocal_notes)
+    vocal_line = [n for n in vocal_line if not _in_long_gap(n[0])]
+    melody = _fill_melody_gaps(vocal_line, other_notes, gaps=gaps)
+
+    # 多和声音进左手：滤高音幻觉→抑长铺垫→抽稀(0.8s 一个和声点)，
+    # 左手只保留最突出的和声，密度低、干净
+    harmony = _sparsify_harmony(
+        _suppress_pad_notes(_filter_high_hallucination(other_notes)),
+        min_gap=0.8)
+
+    # 前奏/尾奏(空档)内只保留最突出的声音：再二次抽稀(1.5s 一个音)，
+    # 让器乐段极简，不抢主旋律
+    accomp = []
+    for n in harmony:
+        if _in_gap(n[0]):
+            accomp.append((n[0], n[1], n[2], int(n[3] * 0.85)))
+        else:
+            accomp.append(n)
+    if gaps:
+        gap_harmony = [n for n in accomp if _in_gap(n[0])]
+        keep = [n for n in accomp if not _in_gap(n[0])]
+        sparse = _sparsify_harmony(gap_harmony, min_gap=1.5)
+        accomp = keep + sparse
+        accomp.sort(key=lambda x: x[0])
+
+    midi_data, left, right = fuse_to_piano(melody, accomp)
+    return midi_data, left, right
+
+
+def _estimate_tempo_from_midi_time(midi, notes):
+    """从 MT3 MIDI 解析出的音符起音间隔估算 BPM(供大谱表排版)。"""
+    import numpy as np
+    if len(notes) >= 4:
+        starts = sorted(n[0] for n in notes)
+        gaps = np.diff(starts)
+        gaps = gaps[gaps > 0]
+        if len(gaps):
+            med = float(np.median(gaps))
+            if 0 < med <= 4.0:
+                return min(180, max(50, round(60.0 / med)))
+    return 120.0
+
 
 def fix_hand(hand, max_span=14, window=0.08, max_notes=4, mode="mix"):
     """对一个手的音符做时间窗口分组，保留可弹的子集。
@@ -441,7 +776,8 @@ def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
     right = _drop_tiny(_merge_melody_dups(melody_notes), min_len=0.06)
     left = _denoise_left(left, vel_floor_pct=30, max_len=0.22)
 
-    left = fix_hand(left, max_span=max_span, window=window, max_notes=2, mode="accomp")
+    # 左手每时刻最多 1 音(只留最低音贝斯骨干)，伴奏不杂不乱
+    left = fix_hand(left, max_span=max_span, window=window, max_notes=1, mode="accomp")
     right = fix_hand(right, max_span=max_span, window=window, max_notes=3, mode="melody")
 
     # 时值整形：旋律/伴奏都保留自然时值(不截断，保留延长音与连音)，
@@ -452,9 +788,12 @@ def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
     left = _fix_same_pitch_overlap(left)
     right = _fix_same_pitch_overlap(right)
 
-    # 力度层次：伴奏(左手)压得更低、主旋律(右手)更突出
-    left = _soft_velocity(left, lo=30, hi=80)
-    right = _soft_velocity(right, lo=60, hi=120)
+    # 力度层次：伴奏(左手)默认比主旋律(右手)小 25%。
+    # 两手先映射到同一基础区间(80~120)，再对左手整体 ×0.75
+    # → 左手 ≈ 60~90 = 右手 75%，伴奏稳定弱于旋律 25%。
+    left = _soft_velocity(left, lo=80, hi=120)
+    right = _soft_velocity(right, lo=80, hi=120)
+    left = [(s, e, p, max(1, int(v * 0.75))) for s, e, p, v in left]
 
     # 兜底: 删除任何完全重复的音符
     left = _dedupe_exact(left)
@@ -852,6 +1191,36 @@ def _estimate_tempo(midi_data):
     return 120.0
 
 
+def _melody_similarity(orig_wav, piano_wav):
+    """深度思考自检②：旋律保真度(原曲 vs 钢琴 WAV)。
+
+    用 chroma(音高类特征)+ 全局 DTW 比对两者旋律：
+    - 返回 (归一化 DTW 成本, 相似度)。成本 0=完全一致，成本越高越不像；
+    - 相似度 = exp(-成本)，1=一致，0=完全不同。
+    纯本地计算(秒级)，不联网、不依赖指纹库。
+    """
+    try:
+        import numpy as np
+        import librosa
+
+        def _chroma(path):
+            y, sr = librosa.load(path, sr=22050, mono=True, duration=90.0)
+            c = librosa.feature.chroma_cens(y=y, sr=sr, hop_length=1024)
+            step = max(1, int(c.shape[1] / (90 * 5)))
+            return c[:, ::step]
+
+        ca = _chroma(orig_wav)
+        cb = _chroma(piano_wav)
+        if ca.shape[1] < 5 or cb.shape[1] < 5:
+            return None
+        # 全局 DTW(非子序列)：整曲旋律走向对齐
+        d, _p = librosa.sequence.dtw(ca, cb, metric="cosine")
+        cost = float(d[-1, -1]) / max(1, ca.shape[1])
+        return (cost, float(np.exp(-cost)))
+    except Exception:
+        return None
+
+
 def _estimate_tempo_from_audio(wav_path):
     """用 librosa 节拍跟踪直接从音频估 BPM，比音符间奏推断准得多。
 
@@ -870,6 +1239,35 @@ def _estimate_tempo_from_audio(wav_path):
     except Exception:
         pass
     return None
+
+
+def _beat_alignment_score(left, right, tempo):
+    """深度思考自检①：节拍对齐度(规则奖励)。
+
+    把所有音符起音按当前 BPM 的“四分音符网格”取余，若起音明显偏离
+    网格(半拍以上)，说明 BPM 或相位不对，乐谱量化后会整体错位。
+    返回 (错位比例 0~1, 平均偏移秒)。错位比例越低越好。
+    """
+    try:
+        import numpy as np
+        quarter = 60.0 / float(tempo)
+        onsets = sorted(n[0] for n in (left or []) + (right or []))
+        if len(onsets) < 8:
+            return 0.0, 0.0
+        ons = np.asarray(onsets, dtype=np.float64)
+        # 网格相位未知，扫 8 个相位候选取最优，避免整体偏移误判
+        best_bad = 1.0
+        best_off = 1e9
+        for k in range(8):
+            ph = (ons - k * quarter / 8.0) % quarter
+            off = np.minimum(ph, quarter - ph)
+            bad = float(np.mean(off > quarter * 0.35))
+            mean_off = float(np.mean(off))
+            if bad < best_bad or (bad == best_bad and mean_off < best_off):
+                best_bad, best_off = bad, mean_off
+        return best_bad, best_off
+    except Exception:
+        return 0.0, 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1398,42 @@ def _suppress_pad_notes(notes, max_len=0.7, min_pitch=62):
     return out
 
 
+def _filter_high_hallucination(notes, high_pitch=79, neighbor=0.22):
+    """过滤和弦轨的“高音幻觉”(非钢琴声误识别出的孤立超高音)。
+
+    ByteDance 是纯钢琴模型，喂给它吉他/弦乐等非钢琴声时，会在高音区
+    幻觉出孤立、无和弦支撑的怪音(听起来像“莫名其妙冒出来的高音”)。
+    判定：音高 >= high_pitch(默认 G5=79)且 ±neighbor 秒内没有其它
+    同时发声的音(即不是和弦成员、孤立出现)——这类音丢弃。
+    和弦里的正常高音(与其他音同时响)不受影响。
+    """
+    if not notes:
+        return notes
+    notes = sorted(notes, key=lambda x: x[0])
+    starts = [n[0] for n in notes]
+    from bisect import bisect_left
+    keep = []
+    for i, (s, e, p, v) in enumerate(notes):
+        if p < high_pitch:
+            keep.append((s, e, p, v))
+            continue
+        # 找 ±neighbor 内是否另有同时发声的音(和弦成员)
+        lo = bisect_left(starts, s - neighbor)
+        hi = bisect_left(starts, s + neighbor)
+        has_neighbor = False
+        for j in range(lo, hi):
+            if j == i:
+                continue
+            ns, ne = notes[j][0], notes[j][1]
+            if ns <= e and ne >= s:  # 时间上重叠 → 是和弦成员
+                has_neighbor = True
+                break
+        if has_neighbor:
+            keep.append((s, e, p, v))
+        # 否则孤立高音 → 幻觉，丢弃
+    return keep
+
+
 def _track_lead_line(notes, window=0.12, max_step=7, min_gap=0.12):
     """提取连贯的单声部主旋律线(前奏/尾奏用)。
 
@@ -1046,9 +1480,17 @@ def _track_lead_line(notes, window=0.12, max_step=7, min_gap=0.12):
     return out
 
 
-def _find_vocal_gaps(vocal_notes, other_notes, gap_thresh=1.5):
-    """找出人声空档(前奏/间奏/尾奏)的起止时间 [(start, end), ...]。"""
+def _find_vocal_gaps(vocal_notes, other_notes, gap_thresh=2.2):
+    """找出人声空档(前奏/间奏/尾奏)的起止时间 [(start, end), ...]。
+
+    阈值取 2.2 秒(比早期 1.5 更保守)：Basic Pitch 对弱音/气声/连音
+    偶尔漏识别，若阈值太小，乐句中间的正常停顿会被误判成"间奏"，
+    导致人声旋律被整段丢弃、在旋律中"突然消失"。只有真正较长的
+    器乐段(前奏/间奏/尾奏)才判定为空档。
+    """
     vs = sorted(vocal_notes, key=lambda x: x[0])
+    if not vs:
+        return []
     gaps = []
     if vs[0][0] > gap_thresh:
         gaps.append((0.0, vs[0][0]))
@@ -1062,12 +1504,16 @@ def _find_vocal_gaps(vocal_notes, other_notes, gap_thresh=1.5):
     return gaps
 
 
-def _fill_melody_gaps(vocal_notes, other_notes, gap_thresh=1.5, gaps=None):
+def _fill_melody_gaps(vocal_notes, other_notes, gap_thresh=2.2, gaps=None):
     """人声空档(前奏/间奏/尾奏)用和声轨的“最高音线”填充主旋律。
 
     前奏/间奏的主奏乐器通常位于同时发声的最高音——对空档内的
     和声轨音符按起音簇取最高音线(与整体分析的启发式分手一致)，
     而不是把中高音全塞进旋律。这样前奏的旋律线才还原、干净。
+
+    人声优先保证：空档判定保守(阈值 2.2s)，且短空档(≤2.5s)内
+    若和声轨找不到连续主奏线，用相邻人声音高线性桥接，避免
+    “人声旋律突然消失”的断档。
     """
     if not vocal_notes:
         top_line, _rest = _split_melody_accomp(other_notes)
@@ -1077,14 +1523,37 @@ def _fill_melody_gaps(vocal_notes, other_notes, gap_thresh=1.5, gaps=None):
     if not gaps:
         return vocal_notes
     fill = []
+    vocals_sorted = sorted(vocal_notes, key=lambda x: x[0])
     for gs, ge in gaps:
         gap_notes = [(s, e, p, v) for s, e, p, v in other_notes if gs <= s < ge]
         # 前奏/尾奏的器乐主旋律：连续性跟踪成一条线(修正八度乱跳)，
         # min_gap=0.18 保持正常旋律密度(太稀会像被删掉)
         line = _track_lead_line(gap_notes, min_gap=0.18, max_step=6)
-        # 前奏/尾奏的主旋律要明显压过伴奏：力度抬到 ≥100(在右手归一化后
-        # 位于最上层)，否则器乐段旋律线会被左手伴奏盖住
-        fill.extend((s, e, p, max(v, 100)) for s, e, p, v in line)
+        if line:
+            fill.extend((s, e, p, max(v, 100)) for s, e, p, v in line)
+            continue
+        # 器乐轨没有连续主奏线：用空档前后的人声音高桥接，旋律不中断。
+        # 只对较短的间奏(≤2.5s)桥接；更长的真间奏(前奏/尾奏)留白
+        # 让乐句呼吸，不强行续写。
+        if ge - gs > 2.5:
+            continue
+        before = [n for n in vocals_sorted if n[1] <= gs + 1e-4]
+        after = [n for n in vocals_sorted if n[0] >= ge - 1e-4]
+        if not before or not after:
+            continue
+        bp = before[-1][2]
+        ap = after[0][2]
+        bridge = []
+        t = gs
+        seg = 0.5  # 桥接音符步长
+        n_steps = max(1, int(round((ge - gs) / seg)))
+        for k in range(1, n_steps):
+            frac = k / n_steps
+            p = int(round(bp + (ap - bp) * frac))
+            t0 = gs + (ge - gs) * (k - 1) / n_steps
+            t1 = gs + (ge - gs) * k / n_steps
+            bridge.append((t0, t1, p, 95))
+        fill.extend(bridge)
     return vocal_notes + fill
 
 
@@ -1114,28 +1583,40 @@ def transcribe_stems(stems, model_path, progress):
     if len(vocal_notes) < 10:
         progress("人声轨音符过少，退回整体分析…")
         return None
-    bass_notes = notes_of(stems["bass"], "贝斯声部")
+    # 贝斯完全不需要(不识别、不使用)；鼓也不使用(无贝斯可对齐)
     other_notes = notes_of(stems["other"], "和声伴奏")
-    drum_notes = notes_of(stems["drums"], "鼓点节奏", min_len=100)
 
-    progress("正在融合人声/贝斯/和声/鼓点并调整成可弹钢琴谱…")
+    progress("正在融合人声/和声并调整成可弹钢琴谱…")
     gaps = _find_vocal_gaps(vocal_notes, other_notes)
 
     def _in_gap(s):
         return any(gs <= s < ge for gs, ge in gaps)
 
-    # 长休止(空档)内的人声音符多为串音/残响，丢弃并改用器乐主旋律线
-    vocal_notes = [n for n in vocal_notes if not _in_gap(n[0])]
+    def _in_long_gap(s):
+        return any(gs <= s < ge and (ge - gs) > 2.5 for gs, ge in gaps)
+
+    # 仅长器乐段(>2.5s 前奏/尾奏)内的人声丢弃，改用器乐主旋律线；
+    # 短空档内的人声保留(可能是识别漏音)，避免旋律突然消失
+    vocal_notes = [n for n in vocal_notes if not _in_long_gap(n[0])]
 
     melody = _fill_melody_gaps(vocal_notes, other_notes, gaps=gaps)
-    # 伴奏和声先抑制提琴/弦乐长音铺垫，再抽稀成短和声点
-    harmony = _sparsify_harmony(_suppress_pad_notes(other_notes), min_gap=0.5)
-    stabs = _drum_to_bass_stabs(drum_notes, bass_notes)
 
-    # 通用平衡: 伴奏=贝斯+鼓点强化+稀疏和声，空档内整体压轻×0.85
+    # 多和声音进左手：抑长铺垫后抽稀(0.9s 一个和声点)，密度低
+    harmony = _sparsify_harmony(_suppress_pad_notes(other_notes), min_gap=0.9)
+
+    # 前奏/尾奏(空档)内二次抽稀(1.5s 一个音)，只留最突出的声音
     accomp = []
-    for n in bass_notes + stabs + harmony:
-        accomp.append((n[0], n[1], n[2], int(n[3] * 0.85)) if _in_gap(n[0]) else n)
+    for n in harmony:
+        if _in_gap(n[0]):
+            accomp.append((n[0], n[1], n[2], int(n[3] * 0.85)))
+        else:
+            accomp.append(n)
+    if gaps:
+        gap_harmony = [n for n in accomp if _in_gap(n[0])]
+        keep = [n for n in accomp if not _in_gap(n[0])]
+        sparse = _sparsify_harmony(gap_harmony, min_gap=1.5)
+        accomp = keep + sparse
+        accomp.sort(key=lambda x: x[0])
     midi_data, left, right = fuse_to_piano(melody, accomp)
     return midi_data, left, right
 
@@ -1592,7 +2073,7 @@ def render_score_pdf(ms_exe, xml_path, pdf_path, left, right, bpm,
 
 
 def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
-                 use_separation=True, simple_mode=False):
+                 use_separation=True, simple_mode=False, use_mt3=False):
     """完整管线，progress(str) 用于回报状态。返回产物路径字典。
 
     两种模式：
@@ -1600,6 +2081,9 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
         → 融合(旋律=人声, 伴奏=贝斯+其他) → 可弹钢琴谱；
       - simple_mode=True(简洁模式)：不分轨，整体识别 + 按音高切左右手，
         经典流程，更快更稳定。
+      - use_mt3=True(AI 智能识别增强)：分轨时用 ByteDance 钢琴转录模型
+        重点识别和弦(人声→和弦→贝斯，CPU 接近实时，比 MT3 快约 6 倍)；
+        不分轨则整曲 MT3(限时 90 秒)。失败自动回退常规流程。
 
     核心保证：要么三样产物(MIDI/钢琴WAV/五线谱PDF)全部有效生成，
     要么抛异常报错——绝不允许出现“生成了曲子却没有对应五线谱”的状态。
@@ -1633,6 +2117,36 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
     midi_data = None
     left = right = None
     tempo = 120.0
+    if use_mt3 and not simple_mode:
+        # AI 智能识别增强：分轨时用 ByteDance 钢琴转录模型识别和弦(重点
+        # 人声→和弦→贝斯，CPU 接近实时，比 MT3 快约 6 倍)；不分轨则整曲 MT3。
+        # 任何失败都回退常规流程。
+        if use_separation:
+            try:
+                progress("和弦增强：先分离四轨，再重点识别和弦…")
+                stems = separate_stems(decoded, out_dir, base, progress)
+                if stems:
+                    res = transcribe_stems_enhanced(stems, model_path, progress)
+                    if res is not None:
+                        midi_data, left, right = res
+                        progress("和弦增强识别完成，进入谱面整理。")
+            except Exception as e:
+                midi_data = left = right = None
+                progress(f"和弦增强识别不可用({e})，退回常规流程…")
+        if midi_data is None:
+            # 未分轨或分轨增强失败 → 整曲 MT3(需 MT3 权重)
+            mt3_ckpt = find_mt3_checkpoint()
+            if mt3_ckpt:
+                try:
+                    midi_data, left, right, tempo = transcribe_mt3(
+                        decoded, mt3_ckpt, progress, model_path=model_path
+                    )
+                    progress("MT3 智能识别完成，进入谱面整理。")
+                except Exception as e:
+                    midi_data = left = right = None
+                    progress(f"MT3 增强识别不可用({e})，退回常规流程…")
+            else:
+                progress("未找到 MT3 智能识别模型，使用常规流程。")
     if simple_mode:
         # 简洁模式：整体识别 + 按音高切左右手(不分轨、不融合)
         from basic_pitch.inference import Model
@@ -1660,6 +2174,37 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
         progress(f"检测到乐曲速度 {tempo:.0f} BPM…")
     else:
         progress(f"使用推算速度 {tempo:.0f} BPM…")
+
+    # —— 深度思考自检①：节拍对齐 ——
+    # 规则奖励式验证：测当前 BPM 下音符起音对节拍网格的错位比例；
+    # 若错位高，从候选 BPM(MIDI 推断、±2 档)里选对齐最好的，自动修正。
+    try:
+        cands = []
+        if tempo:
+            cands.append(("当前", float(tempo)))
+        try:
+            midi_bpm = _estimate_tempo(midi_data)
+            if midi_bpm and abs(midi_bpm - tempo) > 0.5:
+                cands.append(("MIDI推断", float(midi_bpm)))
+        except Exception:
+            pass
+        for d in (-2.0, 2.0):
+            if tempo + d >= 40:
+                cands.append((f"{d:+.0f}BPM", float(tempo + d)))
+        best_bad, best_t, best_off = 1.0, float(tempo), 0.0
+        for name, c in cands:
+            bad, off = _beat_alignment_score(left, right, c)
+            if bad < best_bad:
+                best_bad, best_t, best_off = bad, c, off
+        if best_t != tempo and best_bad < 1.0:
+            progress(
+                f"节拍自检：{best_t:.0f} BPM 对齐更好(错位 {best_bad:.0%})，"
+                f"已从 {tempo:.0f} BPM 自动修正")
+            tempo = best_t
+        elif best_bad > 0.35:
+            progress(f"节拍自检：当前速度错位偏高({best_bad:.0%})，已尽量修正")
+    except Exception:
+        pass
 
     # 参考谱拼接(前奏/尾奏)：输出目录有 <歌名>_前奏参考.musicxml /
     # <歌名>_尾奏参考.musicxml 时，直接拼进成品对应小节(简洁模式不拼接)
@@ -1691,6 +2236,61 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
             f"{'; '.join(pdf_paths)}；{midi_path}）"
         )
 
+    # —— 深度思考自检②：旋律保真度验证(回炉机制) ——
+    # 原曲 vs 钢琴 WAV 的 chroma+DTW 归一化成本；成本 >0.15(明显跑偏)
+    # 时自动换一条管线(简洁模式)重跑一次，取成本更低的结果。
+    _chk = _melody_similarity(decoded, out_wav)
+    if _chk is None:
+        _cost0, sim = None, None
+    else:
+        _cost0, sim = _chk
+    if _cost0 is not None and _cost0 > 0.15 and not simple_mode:
+        progress(f"旋律自检：相似度 {sim:.2f} 偏低，回炉重试(换简洁模式)…")
+        try:
+            from basic_pitch.inference import Model as _Bp2
+            _m2 = _Bp2(model_path)
+            _notes2 = transcribe_notes(decoded, _m2, progress,
+                                       label="全曲音符(回炉)", min_len=127)
+            _midi2, _left2, _right2 = _simple_piano(_notes2)
+            _tempo2 = _estimate_tempo(_midi2)
+            if t_audio:
+                _tempo2 = t_audio
+            _nb2 = max(_total_bars(_left2, _tempo2), _total_bars(_right2, _tempo2))
+            _midi2 = _build_hands_midi(_left2, _right2)
+            _midi2.write(midi_path)
+            write_grand_staff_xml(_left2, _right2, xml_path, bpm=_tempo2,
+                                  n_bars=_nb2, splice=None)
+            _pdf2 = render_score_pdf(
+                ms_exe, xml_path, pdf_path, _left2, _right2, _tempo2,
+                base, out_dir, progress, n_bars=_nb2, splice=None)
+            render_wav(ms_exe, midi_path, out_wav, progress)
+            _chk2 = _melody_similarity(decoded, out_wav)
+            if _chk2 is not None:
+                _cost2, _sim2 = _chk2
+            else:
+                _cost2, _sim2 = None, None
+            if _cost2 is not None and _cost2 < _cost0:
+                left, right = _left2, _right2
+                tempo = _tempo2
+                pdf_paths = _pdf2
+                _cost0, sim = _cost2, _sim2
+                progress(f"回炉成功：DTW 成本降到 {_cost0:.3f}(相似度 {sim:.2f})，采用新结果。")
+            else:
+                # 回炉没更好，还原第一版结果
+                _restore = _build_hands_midi(left, right)
+                _restore.write(midi_path)
+                write_grand_staff_xml(left, right, xml_path, bpm=tempo,
+                                      n_bars=n_bars, splice=splice)
+                pdf_paths = render_score_pdf(
+                    ms_exe, xml_path, pdf_path, left, right, tempo,
+                    base, out_dir, progress, n_bars=n_bars, splice=splice)
+                render_wav(ms_exe, midi_path, out_wav, progress)
+                progress(f"回炉未改善，保留原结果(DTW 成本 {_cost0:.3f})。")
+        except Exception as _e2:
+            progress(f"回炉失败({_e2})，保留原结果。")
+    elif sim is not None:
+        progress(f"旋律自检通过：与原曲相似度 {sim:.2f}。")
+
     # 清理临时解码文件
     if decoded == wav_for_bp and os.path.isfile(wav_for_bp):
         try:
@@ -1719,7 +2319,7 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("TuneScript AI V0.1")
+        root.title("TuneScript AI V0.3")
         root.geometry("640x400")
         root.resizable(False, False)
 
@@ -1770,6 +2370,11 @@ class App:
             opt, text="人声/伴奏分离分析(更准更干净，约多花几分钟；分离出的人声/鼓/贝斯/伴奏轨会一并保存)",
             variable=self.sep_var,
         ).pack(anchor="w")
+        self.mt3_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opt, text="AI 智能识别增强(重点识别和弦，比 MT3 快约 6 倍；人声/贝斯用快速引擎)",
+            variable=self.mt3_var,
+        ).pack(anchor="w")
 
         mid = ttk.Frame(self.root)
         mid.pack(fill="x", **pad)
@@ -1799,6 +2404,10 @@ class App:
             lines.append("ffmpeg：已找到(支持 MP3/M4A 等)")
         else:
             lines.append("ffmpeg：未找到(仅支持 WAV/FLAC/OGG)")
+        if find_btd_checkpoint():
+            lines.append("和弦增强(ByteDance)：可用")
+        else:
+            lines.append("和弦增强(ByteDance)：未找到(和弦轨退回快速引擎)")
         self.env_text.set("　|　".join(lines))
 
     # ---- 事件 ----
@@ -1873,6 +2482,7 @@ class App:
                 audio, outdir, self.model_path, self.ms_exe, self.ffmpeg, progress,
                 use_separation=self.sep_var.get(),
                 simple_mode=self.simple_var.get(),
+                use_mt3=self.mt3_var.get(),
             )
             self.q.put(("done", results))
         except Exception as e:
@@ -1919,6 +2529,8 @@ class App:
         self.root.after(120, self._poll)
 
 
+
+
 def cli_main():
     """隐藏的命令行模式，便于自动化/打包自检。
 
@@ -1958,6 +2570,8 @@ def cli_main():
                     help="跳过人声/伴奏分离，直接用整体分析")
     ap.add_argument("--simple", action="store_true",
                     help="简洁模式：不分轨，按音高切左右手(经典流程)")
+    ap.add_argument("--mt3", action="store_true",
+                    help="AI 智能识别增强：用 MT3 多声部模型识别全曲和弦(更丰富，CPU 较慢)")
     ap.add_argument("--help", action="store_true")
     # 剥掉 main() 已消耗的 "--cli"，避免 argparse 报未知参数
     argv = [a for a in sys.argv[1:] if a != "--cli"]
@@ -1970,6 +2584,7 @@ def cli_main():
             progress,
             use_separation=not args.no_sep,
             simple_mode=args.simple,
+            use_mt3=args.mt3,
         )
     except Exception as e:
         _safe_write(sys.stderr, "ERROR: " + str(e) + "\n")
