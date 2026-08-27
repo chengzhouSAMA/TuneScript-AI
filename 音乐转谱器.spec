@@ -14,6 +14,7 @@ a = Analysis(
                    'torchaudio', 'soundfile', 'audioread', 'einops', 'julius',
                    'omegaconf', 'dora_search', 'openunmix',
                    'Crypto.Cipher.AES', 'Crypto.Cipher._mode_ecb',
+                   'tkinterdnd2', 'tkinterdnd2.TkinterDnD', 'tkinterdnd2.DND_FILES',
                    'mt3_infer', 'mt3_infer.api', 'mt3_infer.base',
                    'mt3_infer.adapters', 'mt3_infer.adapters.mr_mt3',
                    'mt3_infer.adapters.mt3_pytorch', 'mt3_infer.adapters.yourmt3',
