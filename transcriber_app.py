@@ -612,18 +612,30 @@ def transcribe_stems_enhanced(stems, model_path, progress):
         progress("分轨人声音符过少，退回常规流程…")
         return None
 
-    # 和弦(其他轨)用 ByteDance 钢琴转录模型——多音高和弦识别(重点增强)
+    # 和弦声源(左手)：6 轨分离时优先用 钢琴+吉他 轨(伴奏细分，更贴近
+    # 真实和声)，没有则退回"其他"轨。用 ByteDance 做多音高和弦识别。
+    harm_paths = []
+    for k in ("piano", "guitar"):
+        if stems.get(k):
+            harm_paths.append(stems[k])
+    if not harm_paths and stems.get("other"):
+        harm_paths.append(stems["other"])
     btd_ckpt = find_btd_checkpoint()
     if btd_ckpt:
         btd_model = _btd_model(btd_ckpt)
-        other_notes = _btd_track_notes(stems["other"], btd_model, progress, "和弦伴奏")
+        harm_notes = []
+        for hp in harm_paths:
+            harm_notes += _btd_track_notes(hp, btd_model, progress, "和弦伴奏")
+        other_notes = harm_notes or None
     else:
         progress("未找到和弦增强模型，和弦轨用快速引擎…")
-        other_notes = transcribe_notes(stems["other"], bp_model, progress,
-                                       label="和声伴奏")
-
-    # 贝斯完全不需要(不识别、不使用)；鼓也不使用(无贝斯可对齐)
-    # 左手伴奏 = 多和声音(其他轨)，滤高音幻觉、抑长铺垫后稀疏保留
+        other_notes = None
+        for hp in harm_paths:
+            other_notes = (other_notes or []) + transcribe_notes(
+                hp, bp_model, progress, label="和声伴奏")
+    if not other_notes:
+        other_notes = transcribe_notes(stems.get("other", stems["vocals"]),
+                                       bp_model, progress, label="和声伴奏")
 
     progress("正在融合分轨结果并整理成可弹钢琴谱…")
     gaps = _find_vocal_gaps(vocal_notes, other_notes)
@@ -636,8 +648,9 @@ def transcribe_stems_enhanced(stems, model_path, progress):
         # 短空档内的人声保留(可能是识别漏音)，避免旋律突然消失
         return any(gs <= s < ge and (ge - gs) > 2.5 for gs, ge in gaps)
 
-    # 人声轨取最高音线=主旋律；仅长器乐段内丢弃人声改用器乐最高音线
-    vocal_line = _melody_line(vocal_notes)
+    # 人声轨取最高音线=主旋律；合并合成人声抖动碎音(VOCALOID)；
+    # 仅长器乐段内丢弃人声改用器乐最高音线
+    vocal_line = _dejitter_melody(_melody_line(vocal_notes))
     vocal_line = [n for n in vocal_line if not _in_long_gap(n[0])]
     melody = _fill_melody_gaps(vocal_line, other_notes, gaps=gaps)
 
@@ -799,6 +812,9 @@ def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
     left = _dedupe_exact(left)
     right = _dedupe_exact(right)
 
+    # 左右手音域分离：左手高音降八度，避免两手糊在一起
+    left = _separate_hands(left, right_min=60)
+
     return _build_hands_midi(left, right), left, right
 
 
@@ -920,6 +936,43 @@ def _merge_melody_dups(notes):
                 continue
         last_same[p] = len(out)
         out.append((s, e, p, v))
+    return out
+
+
+def _dejitter_melody(notes, onset_gap=0.22, min_span=1.0):
+    """合并“合成人声抖动碎音”(VOCALOID/术力口适配)。
+
+    VOCALOID 合成人声常把同一个音输出成大量短碎音(实测起音间隔
+    ~0.08s、同音高重复几十次)，听起来“乱”。真人多音节歌曲的同音
+    反复起音间隔通常 >=0.25s，不会被误并。
+    规则：同音高、起音间隔 <onset_gap 的碎音合并成一条长音。
+    """
+    if not notes:
+        return notes
+    notes = sorted(notes, key=lambda x: (x[0], x[2]))
+    by_pitch = {}
+    for n in notes:
+        by_pitch.setdefault(n[2], []).append(n)
+    out = []
+    for p, grp in by_pitch.items():
+        grp.sort(key=lambda x: x[0])
+        merged = []
+        cur_s, cur_e, cur_v, prev_s = None, None, 0, None
+        for s, e, _p, v in grp:
+            if cur_s is None:
+                cur_s, cur_e, cur_v, prev_s = s, e, v, s
+            elif s - prev_s <= onset_gap:
+                # 与上一音起音间隔小 → 同一音的抖动碎音，并入当前长音
+                cur_e = max(cur_e, e)
+                cur_v = max(cur_v, v)
+                prev_s = s
+            else:
+                merged.append((cur_s, cur_e, p, cur_v))
+                cur_s, cur_e, cur_v, prev_s = s, e, v, s
+        if cur_s is not None:
+            merged.append((cur_s, cur_e, p, cur_v))
+        out.extend(merged)
+    out.sort(key=lambda x: (x[0], x[2]))
     return out
 
 
@@ -1096,6 +1149,8 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
     经典流程：左手=低音区、右手=高音区，每窗最多 4 音、跨度 ≤9 度；
     保留自然时值(连音)与轻踏板；去同音重叠/去重(防抖)。
     """
+    # 先合并合成人声/乐器的同音抖动碎音(术力口/VOCALOID 适配)
+    notes = _dejitter_melody(notes)
     left_raw = [n for n in notes if n[2] < split_pitch]
     right_raw = [n for n in notes if n[2] >= split_pitch]
     left = fix_hand(left_raw, max_span=max_span, window=window,
@@ -1104,6 +1159,7 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
                      max_notes=max_notes, mode="mix")
     left = _fix_same_pitch_overlap(_dedupe_exact(left))
     right = _fix_same_pitch_overlap(_dedupe_exact(right))
+    left = _separate_hands(left, right_min=60)  # 左右手音域分离
     left = _soft_velocity(left, lo=40, hi=100)
     right = _soft_velocity(right, lo=50, hi=110)
     return _build_hands_midi(left, right), left, right
@@ -1112,6 +1168,24 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
 def _drop_tiny(notes, min_len=0.08):
     """过滤超短碎音(基本是识别噪声，听感是‘杂音’)。"""
     return [(s, e, p, v) for s, e, p, v in notes if e - s >= min_len]
+
+
+def _separate_hands(left, right_min=60):
+    """左右手音域分离：左手 ≥right_min 的音降一个八度。
+
+    左手伴奏与右手旋律音域重叠时听起来“糊在一起”。把左手高音区
+    的音整体降八度(60-71 → 48-59)，保证左手 ≤59、右手 ≥60，
+    明确分层且不丢和声色彩。
+    """
+    out = []
+    for s, e, p, v in left:
+        if p >= right_min and p < right_min + 12:
+            out.append((s, e, p - 12, v))
+        elif p >= right_min + 12:
+            out.append((s, e, p - 24, v))
+        else:
+            out.append((s, e, p, v))
+    return out
 
 
 def _denoise_left(notes, vel_floor_pct=25, max_len=0.18):
@@ -1279,9 +1353,10 @@ _SEP_CACHE = {"model": None}
 
 
 def separate_stems(audio_path, out_dir, base, progress, shifts=1):
-    """Demucs 四轨分离(人声/鼓/贝斯/其他)，写四轨 wav 并返回路径字典。
+    """Demucs 六轨分离(人声/鼓/贝斯/吉他/钢琴/其他)，写六轨 wav 并返回路径字典。
 
-    首次运行自动下载 htdemucs 模型(~80MB，缓存在用户目录)。
+    用 htdemucs_6s：比四轨版进一步把伴奏拆出吉他(guitar)与钢琴(piano)，
+    对“伴奏细分”需求更友好。首次运行自动下载模型(~100MB，缓存在用户目录)。
     失败(未装 demucs/无网/模型缺失)返回 None，由调用方回退整体分析——
     分离是“增强”，绝不影响主流程出谱。
     """
@@ -1293,12 +1368,12 @@ def separate_stems(audio_path, out_dir, base, progress, shifts=1):
         from demucs.apply import apply_model
 
         if _SEP_CACHE["model"] is None:
-            progress("加载人声/伴奏分离模型(首次需下载约 80MB)…")
-            _SEP_CACHE["model"] = get_model("htdemucs")
+            progress("加载人声/伴奏分离模型(6 轨版，首次需下载约 100MB)…")
+            _SEP_CACHE["model"] = get_model("htdemucs_6s")
         model = _SEP_CACHE["model"]
         model.cpu()
 
-        progress("AI 正在分离人声/鼓/贝斯/伴奏四轨…")
+        progress("AI 正在分离人声/鼓/贝斯/吉他/钢琴/伴奏六轨…")
         # 自己用 librosa 读(不依赖 PATH 上的 ffprobe/ffmpeg)
         wav, sr = librosa.load(audio_path, sr=model.samplerate, mono=False)
         wav = np.atleast_2d(np.asarray(wav, dtype=np.float32))  # (ch, n)
@@ -1598,6 +1673,7 @@ def transcribe_stems(stems, model_path, progress):
     # 仅长器乐段(>2.5s 前奏/尾奏)内的人声丢弃，改用器乐主旋律线；
     # 短空档内的人声保留(可能是识别漏音)，避免旋律突然消失
     vocal_notes = [n for n in vocal_notes if not _in_long_gap(n[0])]
+    vocal_notes = _dejitter_melody(vocal_notes)
 
     melody = _fill_melody_gaps(vocal_notes, other_notes, gaps=gaps)
 
@@ -2319,7 +2395,7 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("TuneScript AI V0.3")
+        root.title("TuneScript AI V0.4")
         root.geometry("640x400")
         root.resizable(False, False)
 
