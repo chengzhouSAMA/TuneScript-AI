@@ -49,7 +49,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='TuneScript AI V0.3',
+    name='TuneScript AI V0.4',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
