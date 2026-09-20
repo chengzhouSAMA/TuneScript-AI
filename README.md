@@ -222,6 +222,27 @@ FLAC 要黑胶会员，服务端会静默降级——所以返回值里带的是
 用 320k 源跑完整流程测过：六轨分离 → 识别 → 回炉后 sim **0.89**，
 和手上已有的同曲素材（0.8889）一致，说明下载源没问题。
 
+### 登录自己的账号（扫码）
+
+免登录最高一般到 320kbps，而且欧美版权曲只给 30~45 秒试听。
+登录自己的账号能下整曲，有黑胶会员还能拿无损。
+
+```
+python transcriber_app.py --cli --netease-login    # 终端显示二维码，用网易云 App 扫
+python transcriber_app.py --cli --netease-check    # 看当前登录状态
+```
+
+GUI 里「网易云搜索」那一行右侧有「登录…」按钮，点开就是二维码窗口。
+
+扫码流程用的是 eapi 加密的登录接口，登录后 cookie 存在本地 `netease_cookie.txt`
+（**已在 .gitignore 里，不会入库**），也可以改用环境变量 `TS_NETEASE_COOKIE`。
+
+cookie 会过期，所以下载前会自动查一次账号状态：失效时会明确告诉你
+「cookie 已失效，本次按未登录处理」，不会让你以为是会员没生效。
+
+> 别把别人的 cookie 填进来。`MUSIC_U` 是完整会话凭据，谁持有就等于登录了那个账号；
+> 公开仓库里流传的那些 cookie 基本都是误传的，而且多半已经失效。
+
 ## 环境变量
 
 下面这些都默认关闭，不设就是原来的行为。
@@ -248,6 +269,7 @@ TS_NETEASE_ALLOW_TRIAL   0       改 1 允许下载只有几十秒的试听片�
 transcriber_app.py      主程序，分离→识别→融合→渲染，带 GUI
 bilibili.py             B 站 BV → DASH 音频流
 netease.py              网易云搜索 + 下载（明文 api / eapi，含试听片段检测）
+netease_login.py        网易云扫码登录（拿自己的 cookie）+ 登录状态自检
 
 lang_id.py              语种识别，后端可插拔，找不到模型就降级不报错
 audio_crop.py           裁剪 / 人声分段 / 语种分段

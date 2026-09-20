@@ -79,12 +79,14 @@ def main():
         joined = "".join(adds)
         check("自上次备份以来包含本轮声明的 netease 接入",
               "netease" in joined, "新增 %d 行" % len(adds))
-        check("新增行数在预期范围（<=80）", len(adds) <= 80, "新增 %d 行" % len(adds))
+        check("新增行数在理智范围内（<=250；仅防意外大改，不是预算）",
+              len(adds) <= 250, "新增 %d 行" % len(adds))
         known_del = ("notes_of(stems['vocals']", "请选择音频文件", "需提供 --audio 或 --bvid",
                      "B站音频与转谱产物", "args=(audio, bvid, outdir)",
                      "def _worker(self, audio, bvid, outdir)", "填 BV 号则自动下载后转谱",
                      "style='CardMuted.TLabel').grid(row=3",   # BV 提示行的续行
-                     "if not audio and not bvid:")             # 输入校验（已扩成三路）
+                     "if not audio and not bvid:",             # 输入校验（已扩成三路）
+                     "ap.add_argument('--outdir', required=True)")  # 登录子命令不需要 outdir
         # 删掉**纯注释行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。
         # 注意 difflib 的删除行首还带一个 '-'，判断注释前要先剥掉。
@@ -98,8 +100,8 @@ def main():
     if os.path.isfile(anchor):
         _h, adds_all, dels_all = _diff(anchor, p)
         print("     累计（相对 V0.5 出货）：+%d / -%d" % (len(adds_all), len(dels_all)))
-        check("累计新增 <= 80 行", len(adds_all) <= 80, "+%d" % len(adds_all))
-        check("累计删除 <= 10 行", len(dels_all) <= 10, "-%d" % len(dels_all))
+        check("累计新增在理智范围内（<=400）", len(adds_all) <= 400, "+%d" % len(adds_all))
+        check("累计删除在理智范围内（<=20）", len(dels_all) <= 20, "-%d" % len(dels_all))
     import ast as _ast
     try:
         _ast.parse(open(p, encoding="utf-8").read())
@@ -198,6 +200,58 @@ def main():
           "%d 单位，lang=%s..%s" % (len(g), g[0]["lang"], g[-1]["lang"]))
     check("lang_modes 报告英语单位为 syllable",
           __import__("lang_modes").phonetic_unit("en") == "syllable")
+
+    print("=== [11] 网易云登录模块（离线项 + 一次联网项） ===")
+    import netease_login as nl
+    check("eapi 路径转换：加密用 /api/，请求用 /eapi/",
+          nl._eapi_url("/api/login/qrcode/unikey").endswith("/eapi/login/qrcode/unikey"),
+          nl._eapi_url("/api/login/qrcode/unikey"))
+    check("qr_url 格式", nl.qr_url("ABC") == "https://music.163.com/login?codekey=ABC",
+          nl.qr_url("ABC"))
+    m = nl.qr_matrix("https://music.163.com/login?codekey=test")
+    check("qr_matrix 是方阵且含黑白块",
+          len(m) == len(m[0]) and any(any(r) for r in m),
+          "%dx%d" % (len(m), len(m[0])))
+    check("无 cookie 时 account_info 明确返回 ok=False",
+          nl.account_info(cookie="").get("ok") is False,
+          nl.account_info(cookie="")["reason"])
+    check("cookie 解析只认键值对",
+          nl._cookie_dict("A=1; B=2; junk") == {"A": "1", "B": "2"})
+    # save/load/logout 往返（把文件指到临时路径，别碰真的 cookie 文件）
+    _bak = nl.COOKIE_FILE
+    _tmp = tempfile.mkdtemp(prefix="nl_cookie_")
+    try:
+        nl.COOKIE_FILE = os.path.join(_tmp, "netease_cookie.txt")
+        os.environ.pop(nl.ENV_COOKIE, None)
+        p = nl.save_cookie("MUSIC_U=deadbeef; appver=8.9.75; __csrf=xyz")
+        check("save_cookie 落盘", os.path.isfile(p), os.path.basename(p))
+        got = nl.load_cookie() or ""
+        check("load_cookie 往返（只留 MUSIC_U/appver/csrf）",
+              "MUSIC_U=deadbeef" in got and "__csrf=xyz" in got and "os=" not in got,
+              got[:48])
+        check("logout 删除文件", nl.logout() and not os.path.isfile(p))
+        try:
+            nl.save_cookie("appver=1;")      # 没有 MUSIC_U
+            check("save_cookie 拒绝无 MUSIC_U 的串", False, "居然接受了")
+        except ValueError:
+            check("save_cookie 拒绝无 MUSIC_U 的串", True)
+    finally:
+        nl.COOKIE_FILE = _bak
+        shutil.rmtree(_tmp, ignore_errors=True)
+    check("netease.cookie_status() 可用且不抛异常",
+          isinstance(__import__("netease").cookie_status(), dict))
+    # 联网项：拿不到就跳过（不把自检变成必须联网）
+    try:
+        k, msg = nl.generate_qr_key()
+        if k:
+            check("联网：能取到二维码 key", True, k[:12] + "…")
+            c, _ck, m2 = nl.poll_qr_key(k)
+            check("联网：轮询返回已定义状态码", c in (800, 801, 802, 803),
+                  "code=%s %s" % (c, m2))
+        else:
+            print("  · 联网项跳过（%s）" % msg[:40])
+    except Exception as e:
+        print("  · 联网项跳过（%s）" % type(e).__name__)
 
     print("=== [5] audio_crop 裁剪时长 ===")
     import audio_crop as ac

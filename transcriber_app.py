@@ -3141,8 +3141,12 @@ class App:
         self.netease_var = tk.StringVar()
         self.netease_entry = ttk.Entry(inner, textvariable=self.netease_var, width=48)
         self.netease_entry.grid(row=4, column=1, padx=6, pady=(8, 0), sticky='ew')
-        ttk.Label(inner, text='可选：填歌名/歌手，搜索下载后转谱(默认 320k)',
-                  style='CardMuted.TLabel').grid(row=4, column=2, sticky='w', pady=(8, 0))
+        self.netease_login_btn = ttk.Button(inner, text='登录…', style='Secondary.TButton',
+                                            command=self._netease_login)
+        self.netease_login_btn.grid(row=4, column=2, padx=(6, 0), pady=(8, 0))
+        self.netease_hint = tk.StringVar(value='可选：填歌名/歌手，搜索下载后转谱（默认 320k）')
+        ttk.Label(inner, textvariable=self.netease_hint, style='CardMuted.TLabel').grid(
+            row=5, column=0, columnspan=3, sticky='w', pady=(2, 0))
         inner.columnconfigure(1, weight=1)
 
         env = ttk.Frame(self.root, style='TFrame')
@@ -3219,6 +3223,95 @@ class App:
         else:
             lines.append('和弦增强(ByteDance)：未找到(和弦轨退回快速引擎)')
         self.env_text.set('　|　'.join(lines))
+        self._refresh_netease_hint()
+
+    def _refresh_netease_hint(self):
+        """后台查一次网易云登录状态，结果用来更新输入区那句提示。"""
+        def work():
+            try:
+                from netease_login import quality_hint
+                msg = quality_hint()
+            except Exception as e:
+                msg = '网易云登录状态未知（%s）' % type(e).__name__
+            try:
+                self.root.after(0, lambda: self.netease_hint.set('可选：填歌名/歌手搜索下载。' + msg))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _netease_login(self):
+        """弹出二维码窗口，用自己的网易云账号扫码登录。"""
+        try:
+            import netease_login as NL
+        except Exception as e:
+            messagebox.showerror('错误', '登录模块不可用：%s' % e)
+            return
+        info = NL.account_info()
+        if info.get('ok'):
+            if not messagebox.askyesno(
+                    '已登录', '当前已登录 %s（%s）。\n要重新扫码换账号吗？'
+                    % (info.get('nickname'), info.get('vip_label'))):
+                return
+        win = tk.Toplevel(self.root)
+        win.title('网易云扫码登录')
+        win.transient(self.root)
+        win.resizable(False, False)
+        cv = tk.Canvas(win, width=280, height=280, bg='white', highlightthickness=0)
+        cv.pack(padx=16, pady=(16, 6))
+        st = tk.StringVar(value='正在获取二维码…')
+        ttk.Label(win, textvariable=st, style='Muted.TLabel').pack(padx=16, pady=(0, 12))
+
+        def draw(matrix):
+            cv.delete('all')
+            n = len(matrix)
+            cell = max(1, 280 // n)
+            off = (280 - cell * n) // 2
+            for y, row in enumerate(matrix):
+                for x, v in enumerate(row):
+                    if v:
+                        cv.create_rectangle(off + x * cell, off + y * cell,
+                                            off + (x + 1) * cell, off + (y + 1) * cell,
+                                            fill='black', outline='')
+
+        def poll(unikey):
+            if not win.winfo_exists():
+                return
+            try:
+                code, cookie, msg = NL.poll_qr_key(unikey)
+            except Exception as e:
+                st.set('轮询失败（%s），重试中…' % type(e).__name__)
+                win.after(2500, lambda: poll(unikey))
+                return
+            st.set(msg)
+            if code == NL.ST_OK and cookie:
+                try:
+                    NL.save_cookie(cookie)
+                    st.set('登录成功，已保存到 netease_cookie.txt')
+                    self._refresh_netease_hint()
+                except Exception as e:
+                    st.set('登录成功但保存失败：%s' % e)
+                win.after(1500, win.destroy)
+                return
+            if code == NL.ST_EXPIRED:
+                st.set('二维码已过期，请关掉重开')
+                return
+            win.after(2000, lambda: poll(unikey))
+
+        def fetch():
+            try:
+                unikey, msg = NL.generate_qr_key()
+            except Exception as e:
+                win.after(0, lambda: st.set('获取二维码失败：%s' % type(e).__name__))
+                return
+            if not unikey:
+                win.after(0, lambda: st.set(msg))
+                return
+            m = NL.qr_matrix(NL.qr_url(unikey))
+            win.after(0, lambda: (draw(m), st.set('请用网易云音乐 App 扫码')))
+            win.after(500, lambda: poll(unikey))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
     def _browse_audio(self):
         p = filedialog.askopenfilename(
             title="选择音频文件",
@@ -3249,6 +3342,7 @@ class App:
         self.outdir_entry.config(state='disabled' if running else 'normal')
         self.bvid_entry.config(state='disabled' if running else 'normal')
         self.netease_entry.config(state='disabled' if running else 'normal')
+        self.netease_login_btn.config(state='disabled' if running else 'normal')
         if running:
             self.bar.start(12)
         else:
@@ -3398,10 +3492,14 @@ def cli_main():
     ap.add_argument('--bvid', help='B站视频 BV 号：自动下载音频后转谱(无需 Cookie)')
     ap.add_argument('--netease', help='网易云音乐 歌名/歌手：搜索→下载→转谱(无需 Cookie，默认 320k)')
     ap.add_argument('--netease-id', type=int, help='网易云歌曲 ID：直接下载后转谱')
+    ap.add_argument('--netease-login', action='store_true',
+                    help='扫码登录网易云账号（登录后可下整曲 / 有会员可拿无损）')
+    ap.add_argument('--netease-check', action='store_true',
+                    help='查看网易云 cookie 登录状态')
     ap.add_argument('--quality', default='exhigh',
                     choices=['standard', 'higher', 'exhigh', 'lossless', 'hires'],
                     help='网易云下载音质，默认 exhigh(320k)；lossless/hires 需黑胶会员 Cookie')
-    ap.add_argument('--outdir', required=True)
+    ap.add_argument('--outdir')
     ap.add_argument('--no-sep', action='store_true',
                     help='跳过人声/伴奏分离，直接用整体分析')
     ap.add_argument('--simple', action='store_true',
@@ -3411,6 +3509,30 @@ def cli_main():
     ap.add_argument('--help', action='store_true')
     argv = [a for a in sys.argv[1:] if a != '--cli']
     args = ap.parse_args(argv)
+
+    # 网易云的登录/状态子命令：不需要 --outdir，先短路处理
+    if args.netease_check or args.netease_login:
+        try:
+            import netease_login as NL
+        except Exception as e:
+            _safe_write(sys.stderr, 'ERROR: 登录模块不可用：%s\n' % e)
+            sys.exit(1)
+        if args.netease_check:
+            info = NL.account_info()
+            _safe_write(sys.stdout, json.dumps(info, ensure_ascii=False) + '\n')
+            _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
+            sys.exit(0 if info['ok'] else 1)
+        _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
+        _cookie, _msg = NL.login(progress=lambda m: _safe_write(sys.stderr, '[cli] %s\n' % m))
+        if not _cookie:
+            _safe_write(sys.stderr, 'ERROR: %s\n' % _msg)
+            sys.exit(1)
+        _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
+        sys.exit(0)
+
+    if not args.outdir:
+        _safe_write(sys.stderr, 'ERROR: 需提供 --outdir\n')
+        sys.exit(2)
     try:
         audio = args.audio
         if not audio and args.bvid:

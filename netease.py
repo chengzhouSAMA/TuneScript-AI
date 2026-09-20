@@ -66,6 +66,22 @@ def _cookie_dict(cookie):
     return d
 
 
+def cookie_status():
+    """检查当前 cookie 是否有效（没有 cookie 也返回一个明确结论）。
+
+    返回 {"has","ok","reason","nickname","vip_type","vip_label"}。
+    下载前提示用：cookie 失效时音质会静默降级、欧美版权曲会给试听段。
+    """
+    try:
+        import netease_login as L          # 延迟导入：登录模块反过来要用本模块的 eapi 加密
+        info = dict(L.account_info())
+        info["has"] = bool(L.load_cookie())
+        return info
+    except Exception as e:
+        return {"has": False, "ok": False, "nickname": None, "vip_type": None,
+                "vip_label": None, "reason": "检查失败：%s" % str(e)[:80]}
+
+
 # --------------------------------------------------------------------------
 # 搜索 / 详情
 # --------------------------------------------------------------------------
@@ -271,6 +287,14 @@ def fetch_song(query=None, song_id=None, out_dir=".", level="exhigh",
                 pass
     info = {"query": query, "song_id": song_id, "level": level, "candidates": [],
             "path": None, "ok": False, "reason": "", "resolve": None}
+    # cookie 自检：有 cookie 但已失效时要明说，否则用户会以为"开了会员却没生效"
+    st = cookie_status()
+    info["cookie"] = {k: st.get(k) for k in ("has", "ok", "reason", "nickname",
+                                             "vip_type", "vip_label")}
+    if st.get("has") and not st.get("ok"):
+        log("cookie 已失效（%s），本次按未登录处理" % st.get("reason"))
+    elif st.get("ok"):
+        log("已登录：%s（%s）" % (st.get("nickname"), st.get("vip_label")))
 
     if song_id is None:
         cands = search(query, limit=10)
