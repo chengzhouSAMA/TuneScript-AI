@@ -217,11 +217,11 @@ def main():
           nl.account_info(cookie="")["reason"])
     check("cookie 解析只认键值对",
           nl._cookie_dict("A=1; B=2; junk") == {"A": "1", "B": "2"})
-    # save/load/logout 往返（把文件指到临时路径，别碰真的 cookie 文件）
-    _bak = nl.COOKIE_FILE
+    # save/load/logout 往返（把 cookie 目录指到临时路径，别碰真的 cookie 文件）
+    _bak = nl.COOKIE_DIR_OVERRIDE
     _tmp = tempfile.mkdtemp(prefix="nl_cookie_")
     try:
-        nl.COOKIE_FILE = os.path.join(_tmp, "netease_cookie.txt")
+        nl.COOKIE_DIR_OVERRIDE = _tmp
         os.environ.pop(nl.ENV_COOKIE, None)
         p = nl.save_cookie("MUSIC_U=deadbeef; appver=8.9.75; __csrf=xyz")
         check("save_cookie 落盘", os.path.isfile(p), os.path.basename(p))
@@ -236,8 +236,25 @@ def main():
         except ValueError:
             check("save_cookie 拒绝无 MUSIC_U 的串", True)
     finally:
-        nl.COOKIE_FILE = _bak
+        nl.COOKIE_DIR_OVERRIDE = _bak
         shutil.rmtree(_tmp, ignore_errors=True)
+    # 打包后 cookie 必须落在 exe 同目录，不能用 __file__（那指向解包临时目录）
+    import sys as _s
+    _had = hasattr(_s, "frozen")
+    _old = getattr(_s, "frozen", None)
+    try:
+        _s.frozen = True
+        _s.executable = os.path.join(ROOT, "dist", "TuneScript AI V0.5.1.exe")
+        nl.COOKIE_DIR_OVERRIDE = None
+        cpp = nl.cookie_path()
+        check("冻结态 cookie 路径 = exe 同目录",
+              os.path.dirname(cpp) == os.path.dirname(_s.executable), cpp)
+    finally:
+        if _had:
+            _s.frozen = _old
+        else:
+            delattr(_s, "frozen")
+        nl.COOKIE_DIR_OVERRIDE = _bak
     check("netease.cookie_status() 可用且不抛异常",
           isinstance(__import__("netease").cookie_status(), dict))
     # 联网项：拿不到就跳过（不把自检变成必须联网）

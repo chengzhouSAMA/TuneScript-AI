@@ -42,17 +42,19 @@ COOKIE_FILE = "netease_cookie.txt"
 # Cookie
 # --------------------------------------------------------------------------
 def load_cookie():
-    """按 环境变量 -> 本地文件 的顺序取 cookie。没有就返回 None。"""
+    """按 环境变量 -> 本地文件 的顺序取 cookie。没有就返回 None。
+
+    文件路径交给 `netease_login.cookie_path()` 统一决定，
+    它按「exe 同目录优先」定位——不能用 `__file__`，那在打包后指向解包临时目录。
+    """
     v = (os.environ.get(ENV_COOKIE) or "").strip()
     if v:
         return v
     try:
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), COOKIE_FILE)
-        if os.path.isfile(p):
-            return open(p, encoding="utf-8").read().strip()
+        import netease_login as L
+        return L.load_cookie()
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _cookie_dict(cookie):

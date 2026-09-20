@@ -38,8 +38,27 @@ except Exception:                                          # pragma: no cover
     requests = None
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-COOKIE_FILE = os.path.join(ROOT, "netease_cookie.txt")
+COOKIE_FILE_NAME = "netease_cookie.txt"
+COOKIE_DIR_OVERRIDE = None      # 测试用：把 cookie 目录指到临时路径
 ENV_COOKIE = "TS_NETEASE_COOKIE"
+
+
+def cookie_dir():
+    """cookie 文件所在目录：打包后取 **exe 同目录**，开发态取脚本目录。
+
+    不能用 `__file__` 定位：onefile 打包后它指向解包出来的临时目录，
+    写进去的 cookie 会随临时目录被清掉，也读不到用户放在 exe 旁边的文件。
+    """
+    if COOKIE_DIR_OVERRIDE:
+        return COOKIE_DIR_OVERRIDE
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return ROOT
+
+
+def cookie_path():
+    """cookie 文件的完整路径（用户就是往这个文件里填 MUSIC_U）。"""
+    return os.path.join(cookie_dir(), COOKIE_FILE_NAME)
 REFERER = "https://music.163.com/"
 UA_PC = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -98,30 +117,33 @@ def load_cookie():
     v = (os.environ.get(ENV_COOKIE) or "").strip()
     if v:
         return v
-    if os.path.isfile(COOKIE_FILE):
+    p = cookie_path()
+    if os.path.isfile(p):
         try:
-            return open(COOKIE_FILE, encoding="utf-8").read().strip() or None
+            return open(p, encoding="utf-8").read().strip() or None
         except Exception:
             return None
     return None
 
 
 def save_cookie(cookie):
-    """把 cookie 写到本地文件（只留 MUSIC_U 与 appver）。返回写入路径。"""
+    """把 cookie 写到本地文件（只留必要字段）。返回写入路径。"""
     d = _cookie_dict(cookie)
     keep = {k: v for k, v in d.items() if k in ("MUSIC_U", "__csrf", "appver", "os", "osver")}
     if "MUSIC_U" not in keep:
         raise ValueError("cookie 里没有 MUSIC_U")
     txt = ";".join("%s=%s" % (k, v) for k, v in keep.items()) + ";"
-    with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+    p = cookie_path()
+    with open(p, "w", encoding="utf-8") as f:
         f.write(txt)
-    return COOKIE_FILE
+    return p
 
 
 def logout():
     """删除本地 cookie 文件。"""
-    if os.path.isfile(COOKIE_FILE):
-        os.remove(COOKIE_FILE)
+    p = cookie_path()
+    if os.path.isfile(p):
+        os.remove(p)
         return True
     return False
 

@@ -27,6 +27,7 @@ MUST_DATA = [
     ("lang_id_qwen_runner.py", "Qwen sidecar runner 脚本"),
     ("pykakasi/data/kanwadict4.db", "pykakasi 汉字字典 (9.8MB)"),
     ("pykakasi/data/hepburndict3.db", "pykakasi 罗马音字典"),
+    ("cmudict/data", "cmudict 发音词典数据（英语音素必带）"),
 ]
 
 # ---- PYZ 层：必须存在的 Python 模块 ----
@@ -34,6 +35,10 @@ MUST_MOD = [
     ("__main__", "主程序（PyInstaller 把入口脚本存为 __main__）"),
     ("lang_id", "LID 适配层"),
     ("netease", "网易云搜索下载"),
+    ("en_phoneme", "英语音素/音节/IPA"),
+    ("cmudict", "CMU 发音词典"),
+    ("netease_login", "网易云扫码登录"),
+    ("qrcode", "二维码生成"),
     ("audio_crop", "音频裁剪 / 语言分段"),
     ("lang_modes", "语种预设表"),
     ("lang_pipeline", "语种分割扒谱"),
@@ -51,6 +56,25 @@ MUST_NOT = [
     ("onnxruntime_providers_cuda.dll", "CUDA provider（本机是 CPU 跑，不该打包）"),
     ("onnxruntime_providers_tensorrt.dll", "TensorRT provider（同上）"),
 ]
+
+
+def _collect_strings(code, acc=None, depth=0):
+    """递归收集 code 对象里的字符串常量与名字。
+
+    PYZ 里存的是编译后的 code 而非源码，所以两个地方都要看：
+    `sys.executable` 这种属性访问落在 co_names，不落在 co_consts。
+    """
+    if acc is None:
+        acc = []
+    if depth > 12:
+        return acc
+    for field in ("co_consts", "co_names", "co_varnames"):
+        for c in getattr(code, field, ()) or ():
+            if isinstance(c, str):
+                acc.append(c)
+            elif hasattr(c, "co_consts"):
+                _collect_strings(c, acc, depth + 1)
+    return acc
 
 
 def main():
@@ -116,6 +140,42 @@ def main():
             bad += (0 if ok else 1)
             print("  %s %-30s %s" % ("✓" if ok else "✗", sub, what))
 
+    # ---- 内容层：cookie 路径修复必须真的编译进了 exe（模块在 ≠ 内容是新的）----
+    print("\n=== 内容层（netease_login 里的 cookie 定位方式）===")
+    WANT_CONST = (("netease_cookie.txt", "cookie 文件名"),
+                  ("frozen", "冻结态判断（sys.frozen）"),
+                  ("executable", "取 exe 自身目录（sys.executable）"))
+    if pyz_name is None:
+        bad += len(WANT_CONST)
+    else:
+        tmpd2 = tempfile.mkdtemp(prefix="execonst_")
+        p2 = os.path.join(tmpd2, "PYZ.pyz")
+        try:
+            with open(p2, "wb") as f:
+                f.write(a.extract(pyz_name))
+            z2 = ZlibArchiveReader(p2)
+            key = None
+            for k in z2.toc:
+                if str(k).lower().replace("\\", "/") == "netease_login":
+                    key = k
+                    break
+            if key is None:
+                print("  ! PYZ 里没找到 netease_login")
+                bad += len(WANT_CONST)
+            else:
+                strs = _collect_strings(z2.extract(key))
+                print("  常量数：%d" % len(strs))
+                for want, what in WANT_CONST:
+                    ok = any(want in s for s in strs)
+                    bad += (0 if ok else 1)
+                    print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
+        except Exception as e:
+            print("  ! 常量提取失败：%s" % str(e)[:160])
+            bad += len(WANT_CONST)
+        finally:
+            import shutil
+            shutil.rmtree(tmpd2, ignore_errors=True)
+
     print("\n=== 体积提示（不计入问题）===")
     for sub, what in MUST_NOT:
         present = has(sub, low)
@@ -123,7 +183,7 @@ def main():
     print("  注：V0.5 出货 exe 里同样含这两个 provider（且只有 529 MB），")
     print("      所以它们不是体积元凶；真正的元凶是**整目录打包 lang_id_models**。")
 
-    total = len(MUST_DATA) + (len(MUST_MOD) if mods else 0)
+    total = len(MUST_DATA) + (len(MUST_MOD) if mods else 0) + 3
     print("\n=== 汇总：检查 %d 项，%d 问题 ===" % (total, bad))
     if bad:
         print("需修 spec 后重新构建。")
