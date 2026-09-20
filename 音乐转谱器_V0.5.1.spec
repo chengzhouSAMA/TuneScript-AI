@@ -15,10 +15,39 @@
 # lang_id.resolve_resource() 会按「env → exe 同目录 → 打包内含 → 脚本目录」自动找。
 
 import os
+import atexit
+import shutil
+import tempfile
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 BASE = SPECPATH
+
+# ---- 「把 cookie 烤进 exe」：只有构建目录下真放了 netease_cookie.txt 才会发生 ----
+# 生成的 netease_cookie_baked.py 写进临时目录、只参与本次 Analysis，打包结束即删；
+# 仓库和源码里始终没有密钥。运行时优先级仍是
+#   环境变量 TS_NETEASE_COOKIE  >  exe 同目录 netease_cookie.txt  >  烤入的默认值
+_bake_src = os.path.join(BASE, 'netease_cookie.txt')
+_bake_dir = None
+if os.path.isfile(_bake_src):
+    try:
+        _cookie = open(_bake_src, encoding='utf-8').read().strip()
+    except Exception:
+        _cookie = ''
+    if 'MUSIC_U=' in _cookie:
+        _bake_dir = tempfile.mkdtemp(prefix='ts_bake_')
+        with open(os.path.join(_bake_dir, 'netease_cookie_baked.py'), 'w',
+                  encoding='utf-8') as _f:
+            _f.write('# 构建时自动生成，不入库，不留在磁盘上。\n')
+            _f.write('COOKIE = %r\n' % _cookie)
+        atexit.register(shutil.rmtree, _bake_dir, True)
+        print('[spec] 已把 netease_cookie.txt 烤进 exe（%d 字符）' % len(_cookie))
+    else:
+        print('[spec] netease_cookie.txt 里没有 MUSIC_U=，本次不烤入')
+else:
+    print('[spec] 构建目录没有 netease_cookie.txt，本次不烤入 cookie')
+
+_pathex = [BASE] + ([_bake_dir] if _bake_dir else [])
 
 # ---- pykakasi：必须带 data/*.db，否则汉字→假名会失效 ----
 _pk_data = collect_data_files('pykakasi')
@@ -28,18 +57,18 @@ _pk_mods = collect_submodules('pykakasi')
 _new_mods = [
     'lang_id', 'audio_crop', 'lang_modes', 'lang_pipeline',
     'ja_romaji', 'en_phoneme', 'asr_refine', 'lyrics_fetch', 'lyrics_match',
-    'netease', 'bilibili',
+    'netease', 'netease_login', 'bilibili', 'qrcode',
     'onnxruntime', 'onnxruntime.capi', 'onnxruntime.capi._pybind_state',
     'onnxruntime.capi.onnxruntime_inference_collection',
     'jaconv', 'deprecated', 'wrapt',
-]
+] + (['netease_cookie_baked'] if _bake_dir else [])
 
 # cmudict 自带 CMU 发音词典数据（约 3.5 MB），不带上的话英语音素只能走拼读兜底
 _cmu_data = collect_data_files('cmudict')
 
 a = Analysis(
     [os.path.join(BASE, 'transcriber_app.py')],
-    pathex=[BASE],
+    pathex=_pathex,
     binaries=[],
     datas=[
         ('C:\\Users\\35968\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.9_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python39\\site-packages\\basic_pitch\\saved_models\\icassp_2022', 'basic_pitch/saved_models/icassp_2022'),
@@ -95,6 +124,11 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
+
+# 模块已经被 Analysis 读进内存，磁盘上的临时副本立刻删掉（atexit 兜底）
+if _bake_dir:
+    shutil.rmtree(_bake_dir, ignore_errors=True)
+    _bake_dir = None
 
 exe = EXE(
     pyz,

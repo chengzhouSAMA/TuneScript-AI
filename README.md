@@ -235,13 +235,31 @@ python transcriber_app.py --cli --netease-check    # 看当前登录状态
 GUI 里「网易云搜索」那一行右侧有「登录…」按钮，点开就是二维码窗口。
 
 扫码流程用的是 eapi 加密的登录接口，登录后 cookie 存在本地 `netease_cookie.txt`
-（**已在 .gitignore 里，不会入库**），也可以改用环境变量 `TS_NETEASE_COOKIE`。
+（**已在 .gitignore 里，不会入库**）。
+
+cookie 按三档优先级取，前面的盖掉后面的：
+
+1. 环境变量 `TS_NETEASE_COOKIE` —— 临时切换用
+2. exe / 脚本旁边的 `netease_cookie.txt` —— 日常自用，随时能改
+3. 打包时烤进 exe 的默认值 —— 想做成「一个 exe 走天下」时用
+
+第三档是可选的，平时不存在。要启用就把 `netease_cookie.txt` 放在构建目录再打包：
+spec 会在构建时临时生成一个 `netease_cookie_baked` 模块塞进 exe，打包结束立刻
+删掉磁盘上的副本，所以仓库和源码里始终没有密钥。之后放文件或设环境变量照样能盖掉它。
+
+```
+python -m PyInstaller --noconfirm "音乐转谱器_V0.5.1.spec"
+```
+
+出货的 exe 里**没有**烤入任何 cookie（构建目录没放那份文件）。
 
 cookie 会过期，所以下载前会自动查一次账号状态：失效时会明确告诉你
 「cookie 已失效，本次按未登录处理」，不会让你以为是会员没生效。
+`--netease-check` 的第一行就会告诉你 cookie 是从哪一档来的。
 
-> 别把别人的 cookie 填进来。`MUSIC_U` 是完整会话凭据，谁持有就等于登录了那个账号；
-> 公开仓库里流传的那些 cookie 基本都是误传的，而且多半已经失效。
+> 别把别人的 cookie 填进来，更别把它上传到仓库。`MUSIC_U` 是完整会话凭据，
+> 谁持有就等于登录了那个账号。上传到公开仓库后再删文件也没用——历史提交里照样
+> 匿名下载得到（实测过），唯一的补救是改密码 / 退出所有设备让那条 cookie 失效。
 
 ## 环境变量
 

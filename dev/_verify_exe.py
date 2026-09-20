@@ -169,6 +169,16 @@ def main():
                     ok = any(want in s for s in strs)
                     bad += (0 if ok else 1)
                     print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
+                # 烤入的 cookie 模块：出货 exe 不该有，除非 TS_EXPECT_BAKED=1 明确要求
+                baked = any(str(k).lower().replace("\\", "/") == "netease_cookie_baked"
+                            for k in z2.toc)
+                if os.environ.get("TS_EXPECT_BAKED") == "1":
+                    bad += (0 if baked else 1)
+                    print("  %s %-26s %s" % ("✓" if baked else "✗",
+                                             "netease_cookie_baked", "要求烤入"))
+                else:
+                    print("  %s %-26s %s" % ("·", "netease_cookie_baked",
+                                             "已烤入" if baked else "未烤入（出货默认）"))
         except Exception as e:
             print("  ! 常量提取失败：%s" % str(e)[:160])
             bad += len(WANT_CONST)

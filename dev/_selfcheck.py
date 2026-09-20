@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 
 import numpy as np
 
@@ -238,6 +239,40 @@ def main():
     finally:
         nl.COOKIE_DIR_OVERRIDE = _bak
         shutil.rmtree(_tmp, ignore_errors=True)
+    # 优先级的第三档：打包时烤进 exe 的默认值（用假模块模拟，不碰真密钥）
+    _bak2 = nl.COOKIE_DIR_OVERRIDE
+    _tmp2 = tempfile.mkdtemp(prefix="nl_bake_")
+    try:
+        nl.COOKIE_DIR_OVERRIDE = _tmp2
+        os.environ.pop(nl.ENV_COOKIE, None)
+        check("没有烤入模块时 baked_cookie() 返回 None", nl.baked_cookie() is None)
+        check("三档全空时 cookie_source() 返回 None", nl.cookie_source() is None)
+        _fake = types.ModuleType(nl.BAKED_MODULE)
+        _fake.COOKIE = "MUSIC_U=bakeddeadbeef;"
+        sys.modules[nl.BAKED_MODULE] = _fake
+        try:
+            check("只有烤入时 load_cookie 取到烤入值",
+                  (nl.load_cookie() or "").startswith("MUSIC_U=bakeddeadbeef"),
+                  nl.cookie_source())
+            check("只有烤入时 cookie_source()='baked'",
+                  nl.cookie_source() == "baked")
+            # exe 旁边的文件必须盖过烤入值
+            with open(os.path.join(_tmp2, nl.COOKIE_FILE_NAME), "w",
+                      encoding="utf-8") as f:
+                f.write("MUSIC_U=filewins;")
+            check("文件盖过烤入", "MUSIC_U=filewins" in (nl.load_cookie() or ""),
+                  nl.cookie_source())
+            # 环境变量必须盖过文件
+            os.environ[nl.ENV_COOKIE] = "MUSIC_U=envwins;"
+            check("环境变量盖过文件和烤入",
+                  "MUSIC_U=envwins" in (nl.load_cookie() or ""),
+                  nl.cookie_source())
+        finally:
+            os.environ.pop(nl.ENV_COOKIE, None)
+            sys.modules.pop(nl.BAKED_MODULE, None)
+    finally:
+        nl.COOKIE_DIR_OVERRIDE = _bak2
+        shutil.rmtree(_tmp2, ignore_errors=True)
     # 打包后 cookie 必须落在 exe 同目录，不能用 __file__（那指向解包临时目录）
     import sys as _s
     _had = hasattr(_s, "frozen")

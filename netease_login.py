@@ -41,6 +41,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE_NAME = "netease_cookie.txt"
 COOKIE_DIR_OVERRIDE = None      # 测试用：把 cookie 目录指到临时路径
 ENV_COOKIE = "TS_NETEASE_COOKIE"
+# 构建期「烤进 exe」的默认 cookie 所在模块名。仓库里没有这个文件，
+# 只有 spec 在打包时、且构建目录下确实放了 netease_cookie.txt 才会临时生成。
+BAKED_MODULE = "netease_cookie_baked"
 
 
 def cookie_dir():
@@ -112,18 +115,45 @@ def _eapi_post(path, payload, cookies=None):
 # --------------------------------------------------------------------------
 # cookie 存取
 # --------------------------------------------------------------------------
+def baked_cookie():
+    """打包时烤进 exe 的默认 cookie；没有就返回 None。"""
+    mod = sys.modules.get(BAKED_MODULE)
+    if mod is None:
+        try:
+            mod = __import__(BAKED_MODULE)
+        except Exception:
+            return None
+    return (getattr(mod, "COOKIE", "") or "").strip() or None
+
+
+def cookie_source():
+    """当前 cookie 来自哪里：'env' / 'file' / 'baked'，都没有则 None。"""
+    if (os.environ.get(ENV_COOKIE) or "").strip():
+        return "env"
+    if os.path.isfile(cookie_path()):
+        return "file"
+    if baked_cookie():
+        return "baked"
+    return None
+
+
 def load_cookie():
-    """环境变量优先，其次本地文件。返回整串或 None。"""
+    """按优先级取 cookie：环境变量 → exe 同目录文件 → 打包时烤入。全无则 None。
+
+    烤入的只是**默认值**，放一个文件或设一个环境变量就能随时盖掉它。
+    """
     v = (os.environ.get(ENV_COOKIE) or "").strip()
     if v:
         return v
     p = cookie_path()
     if os.path.isfile(p):
         try:
-            return open(p, encoding="utf-8").read().strip() or None
+            t = open(p, encoding="utf-8").read().strip()
+            if t:
+                return t
         except Exception:
-            return None
-    return None
+            pass
+    return baked_cookie()
 
 
 def save_cookie(cookie):

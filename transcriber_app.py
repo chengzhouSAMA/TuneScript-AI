@@ -3520,6 +3520,8 @@ def cli_main():
         if args.netease_check:
             info = NL.account_info()
             _safe_write(sys.stdout, json.dumps(info, ensure_ascii=False) + '\n')
+            _safe_write(sys.stderr, '[cli] cookie 来源：%s\n'
+                        % (NL.cookie_source() or '无'))
             _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
             sys.exit(0 if info['ok'] else 1)
         _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
