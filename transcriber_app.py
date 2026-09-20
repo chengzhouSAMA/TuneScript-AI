@@ -208,6 +208,157 @@ def _btd_track_notes(wav_path, model, progress, label):
     return notes
 
 
+# 参与「左手伴奏合并」的轨（顺序不影响结果，只影响日志标签）。
+# 2026-09-13 实测（反乌托邦 60-80s，同一转谱器/渲染，见 项目备忘2.0.md）：
+#   A 现状「按响度选最响单轨(guitar)」  sim = 0.7915
+#   B 「合并 piano+guitar+other」        sim = 0.7956
+#   C 「合并全部非人声轨」                sim = 0.7996
+# 单调递增 -> 合并优于单轨。默认取 piano/guitar/other：
+# 【2026-09-19 用户要求】贝斯不参与：不再并入伴奏合并轨，也不再单独进左手。
+# 贝斯轨依然会被 Demucs 分离出来（文件名/界面照常显示茎干轨），只是完全不
+# 参与转谱。旧的做法是把 bass 一起相加进合并轨(见上方实验 C)——低频会污染
+# 和弦识别、并让左手出现不需要的低音线，故明确摘除。
+# 鼓是打击噪声、对钢琴转录是干扰，同样排除(实验 C 含鼓仅再高 0.004，在噪声内)。
+# 想改参与合并的轨：改这个常量，或设环境变量 TS_ACCOMP_STEMS=piano,guitar
+# （env 覆盖能力保留：显式写上 bass 才会重新并入合并轨，但那不再是默认行为。）
+ACCOMP_STEMS = tuple(
+    x.strip() for x in os.environ.get("TS_ACCOMP_STEMS",
+                                      "piano,guitar,other").split(",") if x.strip())
+
+# 「近乎空轨」门槛：RMS 低于【最强参与轨】这个比例的轨不参与合并。
+# Demucs 在非钢琴曲上常把 piano 轨分得几乎全空（反乌托邦 piano RMS 只有
+# 最强轨的 0.6%、other 1.4%）：合进来不提供任何内容，只会白占峰值余量。
+# 想改：设环境变量 TS_ACCOMP_MIN_RATIO=0.02（0 表示不跳过任何轨）。
+ACCOMP_MIN_RATIO = float(os.environ.get("TS_ACCOMP_MIN_RATIO", "0.02"))
+
+
+def _merge_accomp_stems(stems, progress, out_dir=None):
+    """把多条件奏轨【相加合并】成一条 wav，返回 (标签, 路径)。
+
+    为什么合并而不是分别识别：
+      和弦识别模型看到的是完整和声织体，"按响度选最响一轨"会丢掉其它乐器
+      的和声（电子/术力口曲尤其明显）。相加后和声更完整，而且合并成一条
+      只需跑一次识别，不增加耗时。
+
+    两条纪律（2026-09-19 全曲回归后补，实测见 回归验收/全曲回归验收报告.md 第十节）：
+      1) 【跳过近乎空轨】RMS 低于最强参与轨 ACCOMP_MIN_RATIO 倍的轨不参与；
+      2) 【电平匹配】合并后整体 RMS 对齐到最强参与轨的 RMS（只降不升），
+         并且仍以 0.99 峰值为上限防削波。理由：识别模型对输入电平敏感
+         （实测纯 ±1 dB 增益就能让 sim 摆动约 0.01），电平不该和"内容"
+         混成同一个自变量 —— 否则 A/B 比较根本说不清是内容变了还是电平变了。
+      3) 默认【不含 drums】：鼓是打击噪声、对钢琴转录是干扰（附-7 实测含鼓
+         仅再高 0.004，在噪声内）。要含鼓请显式设 TS_ACCOMP_STEMS。
+      4) 默认【不含 bass】：贝斯不参与（2026-09-19 用户要求）。贝斯轨照常被
+         分离，但不并入合并轨、也不单独进左手；低频既污染和弦识别，也不是
+         本次要还原的内容。要重新并入请显式设 TS_ACCOMP_STEMS 并写上 bass。
+
+    任何失败都回退到旧行为 _pick_main_accomp（分离是增强，绝不影响出谱）。
+    """
+    import numpy as np
+    import soundfile as sf
+
+    avail = []
+    for k in ACCOMP_STEMS:
+        p = stems.get(k)
+        if p and os.path.isfile(p):
+            avail.append((k, p))
+    if not avail:
+        return None, None
+    if len(avail) == 1:
+        progress(f"伴奏轨只有 {avail[0][0]} 一条，直接使用。")
+        return avail[0][0], avail[0][1]
+    try:
+        ys, sr, n_ch, n = [], None, 1, 0
+        for k, p in avail:
+            y, _sr = sf.read(p, dtype="float32", always_2d=True)
+            sr = _sr
+            n_ch = max(n_ch, y.shape[1])
+            n = max(n, y.shape[0])
+            ys.append((k, p, y, float(np.sqrt(np.mean(y ** 2)))))
+        # 1) 跳过近乎空的轨（不提供内容，只占峰值余量）
+        loud_rms = max(t[3] for t in ys)
+        thr = loud_rms * ACCOMP_MIN_RATIO
+        kept = [t for t in ys if t[3] >= thr]
+        dropped = [t[0] for t in ys if t[3] < thr]
+        if dropped:
+            progress("跳过近乎空的伴奏轨（%s，低于最强轨的 %.1f%%）。"
+                     % ("+".join(dropped), ACCOMP_MIN_RATIO * 100))
+        if not kept:
+            progress("伴奏轨都不足以参与合并，回退最响单轨。")
+            return _pick_main_accomp(stems)
+        if len(kept) == 1:
+            progress(f"合并后只剩 {kept[0][0]} 一条有效伴奏轨，直接使用。")
+            return kept[0][0], kept[0][1]
+        # 2) 相加后【电平匹配】到最强参与轨（只降不升）+ 峰值安全
+        acc = np.zeros((n, n_ch), dtype="float32")
+        for _k, _p, y, _r in kept:
+            acc[: y.shape[0], : y.shape[1]] += y
+        peak = float(np.abs(acc).max())
+        rms = float(np.sqrt(np.mean(acc ** 2)))
+        target_name, target_rms = max(((t[0], t[3]) for t in kept), key=lambda x: x[1])
+        gain = 1.0
+        if rms > 0:
+            gain = min(1.0, target_rms / rms)     # 只降不升，避免把电平推高
+        if peak * gain > 0.99:                    # 合并后可能超 [-1,1]，防削波
+            gain = 0.99 / peak
+        if abs(gain - 1.0) > 1e-6:
+            acc *= gain
+        # t9(2026-09-20)：合并中间产物**不再写进传入 stem 所在目录**。
+        # 旧行为写到 os.path.dirname(第一条参与轨)，会把 `*_accomp_merged.wav`
+        # 落在**源素材/基线目录**里（`转谱验证/<key>/` 曾因此被写入一个中间文件；
+        # 虽然文件名恒带 `_accomp_merged` 后缀、不会覆盖六轨冻结节拍，
+        # 中间产物落在输入目录本身就是污染）。现在优先写到调用方给的
+        # out_dir（生产路径 = run_pipeline 的产物目录），缺省才退回系统临时目录。
+        # 回退：显式传入想让它落地的目录即可；行为与本改动前一致的做法是
+        # 传 os.path.dirname(第一条参与轨)。
+        first_path = kept[0][1]
+        fn = os.path.splitext(os.path.basename(first_path))[0]
+        b = fn[: -(len(kept[0][0]) + 1)] if fn.endswith("_" + kept[0][0]) else "track"
+        if out_dir:
+            d = out_dir
+            try:
+                os.makedirs(d, exist_ok=True)
+            except OSError:
+                pass
+        else:
+            import tempfile
+            d = tempfile.mkdtemp(prefix="ts_accomp_merge_")
+        out = os.path.join(d, f"{b}_accomp_merged.wav")
+        sf.write(out, acc, sr, subtype="PCM_16")
+        label = "+".join(t[0] for t in kept)
+        progress(f"已合并伴奏轨（{label}）用于和弦识别；"
+                 f"电平对齐到最强轨 {target_name}（{20.0 * np.log10(max(gain, 1e-9)):+.2f} dB）。")
+        return label, out
+    except Exception as e:
+        progress(f"伴奏合并不可用({type(e).__name__})，回退最响单轨。")
+        return _pick_main_accomp(stems)
+
+
+def _pick_main_accomp(stems):
+    """从吉他/钢琴/其他轨中按分离响度(分贝)选出主要伴奏轨。
+
+    各轨分离后的 RMS 响度反映该乐器在编曲中的主次；把最响的
+    一轨作为左手主要伴奏(和弦识别只用它)，伴奏主次分明不混杂。
+    返回 (声部名, wav路径)；全失败返回 (None, None)。
+    """
+    import numpy as np
+    import soundfile as sf
+    best_name, best_path, best_db = None, None, -999.0
+    for k in ("guitar", "piano", "other"):
+        p = stems.get(k)
+        if not p or not os.path.isfile(p):
+            continue
+        try:
+            y, _sr = sf.read(p, dtype="float32", always_2d=True)
+            rms = float(np.sqrt(np.mean(y ** 2)))
+            db = 20.0 * np.log10(rms + 1e-12)
+            if db > best_db:
+                best_db, best_name, best_path = db, k, p
+        except Exception:
+            continue
+    return best_name, best_path
+
+
 # ---------------------------------------------------------------------------
 # 管线函数
 # ---------------------------------------------------------------------------
@@ -394,6 +545,18 @@ def transcribe_notes(wav_path, model, progress, label="音符", min_len=150):
     """
     from basic_pitch.inference import predict
     progress(f"AI 正在识别{label}(乐曲越长越久，请耐心等待)…")
+    # 【t3-B 已弃用 · 2026-09-20】曾试过显式传 frame_threshold（Basic Pitch 默认 0.30）：
+    #   · 「全局 0.35」= arm E：monitoring 音符 841→665、成本 0.204→0.213、
+    #     出厂 sim 0.8122→0.8082（相对基线 **−0.0072，破 −0.005 线**），
+    #     并连带使 t6 的人声接入被保底回滚（0.220>0.218）→ sim 与连续性两轴同时坏。**已回退**；
+    #   · 「仅人声轨 0.35」= arm F：同源配对实测（同一源码快照、只切 `TS_BP_FRAME_THR_VOCAL`
+    #     0.35↔0.30，产物由 verifier 独立量）**在 monitoring 上 4 个指标更差**：
+    #     `at` 76.54→76.35（**−0.19pp**）、`rh` 59.71→59.50（−0.21pp）、
+    #     音级吻合 63.08%→62.47%（**−0.61pp**，而它本该改善这一轴）、八度错位 1→1（**无改善**）；
+    #     唯一为正的是 sim 0.8121519→0.8140011（+0.0018，**低于 ±0.01 噪声地板**）；
+    #   · 另：直接分类两臂差异音符显示它只影响 **34/4917 音（0.7%）**，产物端统计结构性反映不出。
+    # ⇒ **两处都回退**（全局 + 人声轨）。T2 的 7 首 A/B 在人声轨口径上确有效果，但落到产物上不成立。
+    # 取证：回归验收/术力口与人声连续性优化报告.md §三之四、§三之五。
     _model_output, midi_data, _notes = predict(
         wav_path, model_or_model_path=model,
         onset_threshold=0.45, minimum_note_length=min_len,
@@ -534,8 +697,13 @@ def _mt3_track_notes(wav_path, model, progress, label, max_sec=None):
     return _mido_to_notes(midi), truncated
 
 
+# 【已停用 · 2026-09-19】_bass_line() 原为「从 MT3 输出里提取最低音线给贝斯轨用」。
+# 【自 2026-09-19 起不再调用，保留仅为回退】用户要求贝斯不参与转谱后，本函数在
+# 全流程已无任何调用点（0 引用，AST 级核验见 回归验收/_prove_bass_unreachable.py）。
+# 保留函数体只是为了可回退/可查阅，不参与出谱。
+# 需要恢复贝斯路径时，请对照 备份\pre_vocal_optim_20260919_231756\transcriber_app.py。
 def _bass_line(notes, window=0.12):
-    """从 MT3 多音高里提取最低音线(贝斯轨用)。
+    """从 MT3 多音高里提取最低音线(贝斯轨用)。【已停用：全流程零调用，见上方说明】
 
     每个起音簇取最低音(贝斯根音优先)，聚成一条低音线。
     """
@@ -582,7 +750,7 @@ def _melody_line(notes, window=0.12):
     return line
 
 
-def transcribe_stems_enhanced(stems, model_path, progress):
+def transcribe_stems_enhanced(stems, model_path, progress, out_dir=None):
     """分离轨 + 和弦增强(重点：人声→和弦→贝斯)：
 
     1) 先 Demucs 分成 人声/鼓/贝斯/其他 四轨；
@@ -612,25 +780,28 @@ def transcribe_stems_enhanced(stems, model_path, progress):
         progress("分轨人声音符过少，退回常规流程…")
         return None
 
-    # 和弦声源(左手)：6 轨分离时优先用 钢琴+吉他 轨(伴奏细分，更贴近
-    # 真实和声)，没有则退回"其他"轨。用 ByteDance 做多音高和弦识别。
-    harm_paths = []
-    for k in ("piano", "guitar"):
-        if stems.get(k):
-            harm_paths.append(stems[k])
-    if not harm_paths and stems.get("other"):
-        harm_paths.append(stems["other"])
+    # 识别分工(用户指定)：人声=右手主旋律；左手主要伴奏从
+    # 吉他/钢琴/其他中按响度(分贝)选出最响的一轨，和弦识别只用它。
+    # 鼓/贝斯只分离保存、不识别。
+    main_name, main_path = _merge_accomp_stems(stems, progress, out_dir=out_dir)
+    harm_paths = [main_path] if main_path else []
+    if not harm_paths:
+        progress("未找到吉他/钢琴/其他伴奏轨，使用人声轨兜底…")
+        harm_paths = [stems.get("vocals", "")]
     btd_ckpt = find_btd_checkpoint()
-    if btd_ckpt:
+    if btd_ckpt and harm_paths and harm_paths[0]:
         btd_model = _btd_model(btd_ckpt)
         harm_notes = []
         for hp in harm_paths:
-            harm_notes += _btd_track_notes(hp, btd_model, progress, "和弦伴奏")
+            harm_notes += _btd_track_notes(hp, btd_model, progress,
+                                           f"主要伴奏({main_name})")
         other_notes = harm_notes or None
     else:
         progress("未找到和弦增强模型，和弦轨用快速引擎…")
         other_notes = None
         for hp in harm_paths:
+            if not hp:
+                continue
             other_notes = (other_notes or []) + transcribe_notes(
                 hp, bp_model, progress, label="和声伴奏")
     if not other_notes:
@@ -767,10 +938,11 @@ def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
       - 旋律(右)：只删 AI 完全嵌套的重复碎音，**保留一切再起音**——
         日语等多音节语言一字一音、同音反复极多，绝不能合并成一条长音；
         时值不截断，保留延长音与连音，小间隙填补到下一音(连贯但不重叠)；
-      - 左手(伴奏)：只保留贝斯 + 1 个和声音(窗口最多 2 音)，
+      - 左手(伴奏)：保留 1~2 个和声音(窗口最多 2 音)，不再有贝斯轨——
+        贝斯不参与(2026-09-19)，左手内容全部来自合并后的和声轨识别结果；
         同音碎音合并(0.25s)、弱短音过滤更严——伴奏干净不抢戏，同样保留延长音；
       - 右手单音旋律(通用基线，不做八度加厚——低音区八度对会有拍频
-        感“抖”)；左手简洁：贝斯单音为骨干 + 稀疏和声点(0.5s一个)、
+        感“抖”)；左手简洁：稀疏和声点、
         窗口最多 2 音——伴奏干净不抢戏；
       - 力度分左右手映射：伴奏(左)30~80、主旋律(右)60~120，
         主旋律始终压过伴奏；前奏/尾奏的填充旋律力度抬到≥100，
@@ -1155,6 +1327,22 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
     right_raw = [n for n in notes if n[2] >= split_pitch]
     left = fix_hand(left_raw, max_span=max_span, window=window,
                     max_notes=max_notes, mode="mix")
+    # 右手同样用 mode="mix"，与左手一致。
+    #
+    # 【t3-A 已弃用 —— 2026-09-20 回退】曾试过右手改 mode="melody"（最高音优先）。
+    # 合成竞争测试确实证明它有效：当**右手内部**同时存在"响的伴奏音 60/64/67"与
+    # "较弱的旋律 79"时，mix 保留 [60,64,67]（丢旋律）、melody 保留 [79]
+    # （同一输入 264 音符，MIDI 1268 B → 980 B，见 回归验收/_prove_t3a_revert_equiv.py）。
+    # 但在**出厂回炉路径**（= 100% 的出货产物）上它对 5 首真实曲目近乎惰性：
+    #   · shiki 的 B/C 产物 **逐字节相同**（MIDI SHA b3fc190f82c6dafd07ac）；
+    #   · jiabin ≈0、fanwut 略负、monitoring 的 melody 版右手与改动前基线一致；
+    # 而它在 monitoring 上把回炉成本从 0.204 压低到 0.197，使 t6「人声接入」的固有
+    # 代价（+0.008）超出绝对窗口 0.005 → **接入被回滚**，at 覆盖 76.54%→70.35%、
+    # at 断档 1→11、n_notes 913→841（t6 的收益整段作废），而 sim 反而 +0.0057
+    # （去掉 graft 让成本回落）—— **sim 会把这次退化判成 PASS**。
+    # 净效果 = 无收益 + 打断 t6 ⇒ 弃用。取证：回归验收/术力口与人声连续性优化报告.md §三之二。
+    # 注意：若将来要重试，正确做法不是改本行，而是先解决 t6 接入判据的**绝对窗口**问题
+    #      （见 回归验收/_work/_patch_graft_guard.py）。
     right = fix_hand(right_raw, max_span=max_span, window=window,
                      max_notes=max_notes, mode="mix")
     left = _fix_same_pitch_overlap(_dedupe_exact(left))
@@ -1228,6 +1416,8 @@ def _shape_durations(notes, legato_gap=0.10, trim_at_onset=False):
     return out
 
 
+
+
 def _soft_velocity(notes, lo=45, hi=112):
     """把力度线性映射到 [lo, hi]：左右手各用不同区间，
     左手(伴奏)整体更轻、右手(旋律)更突出，层次分明不浑浊。"""
@@ -1265,6 +1455,303 @@ def _estimate_tempo(midi_data):
     return 120.0
 
 
+def _merge_time_intervals(iv, gap=0.0):
+    """把 [start,end] 区间并集化（相邻间隔 ≤ gap 的合并）。"""
+    iv = sorted((float(s), float(e)) for s, e in iv if e > s)
+    if not iv:
+        return []
+    out = [[iv[0][0], iv[0][1]]]
+    for s, e in iv[1:]:
+        if s - out[-1][1] <= gap:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
+def _subtract_intervals(hole, cover):
+    """从 hole=(a,b) 里挖掉 cover 区间列表，返回剩下的子区间。"""
+    a, b = hole
+    pieces = []
+    cur = a
+    for s, e in cover:
+        if e <= cur or s >= b:
+            continue
+        if s > cur:
+            pieces.append((cur, min(s, b)))
+        cur = max(cur, e)
+        if cur >= b:
+            break
+    if cur < b:
+        pieces.append((cur, b))
+    return [(s, e) for s, e in pieces if e > s]
+
+
+def _fill_right_hand(right, mix_notes, vline, split_pitch=60, min_len=0.06,
+                     min_pitch=45, pad=0.06, max_per_sec=3.0, win=0.10,
+                     max_notes_per_win=4, max_span=16, vocal_gap=0.50,
+                     hole_min=0.35, instr_reg=28, add_velocity_floor=58,
+                     dens_target=2.2, dens_win=1.0, same_win=0.05, instr_rate=2.5,
+                     onset_guard=0.12, instr_lo=43):
+    """把右手补成「**有人声处弹人声、无人声处弹伴奏**」。
+
+    ⚠️ 规则 A 与规则 B 用**各自独立的速率预算**（`max_per_sec` / `instr_rate`）：
+       第一版共用一个预算，规则 A 先跑就把预算吃光了 → 无人声段密度几乎没变
+       （实测：无人声段右手 0.81→1.44 音/秒、"空置 >0.5s"仍占 82.7%），主人的反馈①没解决。
+    """
+    """把右手补成「**有人声处弹人声、无人声处弹伴奏**」。
+
+    为什么（新曲「月が綺麗ね」实测，只读诊断见 回归验收/_diag_feedback.py）：
+      · **无人声段 18.5 s 里，右手 81.8% 的时间连续 >0.5 s 一个音都没有** ——
+        独奏钢琴在前奏/间奏听感就是"空手"（主人反馈①）；
+      · **人声真值音节只有 43.8% 在右手被弹出来**（≥C4 的音节更只有 35.8%）——
+        听觉上就是"日语的字没转成音符"（主人反馈③）；
+      · 右手整体密度仅 1.86 音/秒（左手 5.24），整曲织体偏薄（主人反馈②）。
+    两条规则：
+      A) **人声音节**：右手在该时刻没有"同音高"的音 → 补上；**即使该时刻有别音高的伴奏音占着，
+         也补**（那正是"人声被伴奏顶掉"的场景）。目标音高落在右手音区：低于 split_pitch 的
+         升八度（男声人声大量在 C4 以下，不升就永远进不了右手）。
+      B) **无人声段补伴奏**：人声不活跃的区间里，右手若出现 ≥hole_min 的空洞，就从
+         **整曲混音**的右手音区音符里取（每 0.10 s 取最高音、按密度上限稀疏）补进去。
+
+    纪律（与 t6 一致）：**不动左手、不动回炉取舍判据、不删改任何已有音**；只往右手加音。
+    返回 (新的右手, 统计 dict)；异常由调用方捕获并回退。
+    """
+    import bisect
+    right = sorted(right, key=lambda n: (n[0], n[2]))
+    out = list(right)
+    st = {'added': 0, 'added_vocal': 0, 'added_instr': 0, 'skipped_win': 0,
+          'skipped_span': 0, 'skipped_dens': 0, 'skipped_onset': 0}
+    if not out and not mix_notes:
+        return right, st
+    # 诊断开关：两条规则可分别关闭，用来量化各自对 sim 的代价
+    #   RULE_A(人声音节进右手) 默认开；RULE_B(无人声段补伴奏) 默认开
+    _ruleA = os.environ.get('TS_FILL_RULE_A', '1') == '1'
+    _ruleB = os.environ.get('TS_FILL_RULE_B', '1') == '1'
+    gap_sec = 1.0 / max(1e-6, max_per_sec)
+
+    def win_notes(t):
+        return [n for n in out if abs(n[0] - t) <= win]
+
+    def same_pitch_near(t, p):
+        return any(abs(n[0] - t) <= same_win and abs(n[2] - p) <= 1 for n in out)
+
+    def pitches_overlapping(t0, t1):
+        return [n[2] for n in out if n[0] < t1 + pad and n[1] > t0 - pad]
+
+    def busy_near(t0, t1):
+        return any(n[1] > t0 - pad and n[0] < t1 + pad for n in out)
+
+    # ---------------- A) 人声音节 ----------------
+    last = -9.9
+    for s, e, p, v in (sorted(vline, key=lambda n: n[0]) if _ruleA else []):
+        if (e - s) < min_len or p < min_pitch:
+            continue
+        pr = p
+        while pr < split_pitch and pr + 12 <= 100:
+            pr += 12
+        if pr < split_pitch or pr > 100:
+            continue
+        if same_pitch_near(s, pr):
+            continue
+        if len(win_notes(s)) >= max_notes_per_win:
+            st['skipped_win'] += 1
+            continue
+        if (st['added_vocal'] + st['added_instr']) and (s - last) < gap_sec:
+            st['skipped_dens'] += 1
+            continue
+        ps = pitches_overlapping(s, e)
+        if ps and (pr - max(ps) > max_span or min(ps) - pr > max_span):
+            st['skipped_span'] += 1
+            continue
+        out.append((s, e, pr, max(int(v), add_velocity_floor)))
+        st['added_vocal'] += 1
+        last = s
+
+    # ---------------- B) 无人声段补伴奏 ----------------
+    viv = _merge_time_intervals([(s, e) for s, e, p, v in vline if p >= min_pitch],
+                                gap=vocal_gap)
+
+    def in_vocal(t):
+        for s, e in viv:
+            if s <= t <= e:
+                return True
+        return False
+
+    # 无人声区间（viv 的补集）——**规则 B 的密度必须只按"无人声时间"算**。
+    # ⚠️ 第一版用固定 ±dens_win 窗口数音符，窗口会伸进相邻的人声段，而那里已被规则 A 填密
+    #    （实测 3.57 音/秒）→ 局部密度判定永远"已达标"，规则 B 一个音都补不出来
+    #    （现场症状：`无人声段伴奏 0 个`，无人声段右手空置仍占 82.7%）。
+    _endv = max([n[1] for n in out] + [n[1] for n in mix_notes] or [0.0])
+    nonv = []
+    _prev = 0.0
+    for a, b in viv:
+        if a > _prev:
+            nonv.append((_prev, a))
+        _prev = max(_prev, b)
+    if _endv > _prev:
+        nonv.append((_prev, _endv))
+
+    def dens_local(t):
+        lo, hi = t - dens_win, t + dens_win
+        t_seq = sum(max(0.0, min(hi, b) - max(lo, a)) for a, b in nonv)
+        if t_seq <= 0.2:
+            return 99.0                      # 几乎没有无人声时间 → 视为已达标
+        n = len([x for x in out if lo <= x[0] <= hi and not in_vocal(x[0])])
+        return n / t_seq
+
+    # 右手现有音覆盖的空洞（≥ hole_min）——**含前奏（首个音之前）与尾奏（末个音之后）**。
+    # ⚠️ 第一版只找"音与音之间"的空洞，导致"人声还没出来的前奏"这类头尾空段完全补不到
+    #    （单元自检抓出来的：合成的 2.2~4.6s 空段一个音都没补）。
+    rs = sorted((n[0], n[1]) for n in out)
+    holes = []
+    if rs:
+        _end = max([n[1] for n in out] + [n[1] for n in mix_notes] or [0.0])
+        if rs[0][0] >= hole_min:
+            holes.append((0.0, rs[0][0]))
+        prev_end = None
+        for s0, e0 in rs:
+            if prev_end is not None and s0 - prev_end >= hole_min:
+                holes.append((prev_end, s0))
+            prev_end = e0 if prev_end is None else max(prev_end, e0)
+        if prev_end is not None and _end - prev_end >= hole_min:
+            holes.append((prev_end, _end))
+    elif mix_notes:
+        # 右手完全为空：整首就是"一个空洞"（极端情形，仍要能跑而不崩）
+        holes.append((0.0, max(n[1] for n in mix_notes)))
+    # 只补"落在人声不活跃区"的那部分
+    targets = []
+    if _ruleB:
+        for h in holes:
+            for piece in _subtract_intervals(h, viv):
+                if piece[1] - piece[0] >= hole_min:
+                    targets.append(piece)
+    if targets or _ruleB:
+        # 候选：混音里**右手可用音区**、且不在人声活跃区内的音。
+        # ⚠️ 只取 ≥split_pitch 是不够的：实测新曲间奏里整曲混音的 ≥C4 音符**只有 11 个**
+        #    （低音区伴奏全在 C4 以下、被切给左手）→ 规则 B 等于没有素材。
+        #    所以允许把中低音区（instr_lo 起）的伴奏**升八度**搬进右手音区 —— 这正是
+        #    钢琴改编里"把伴奏的中间声部换到右手弹"的常规做法。
+        cand = []
+        for n in mix_notes:
+            if not (instr_lo <= n[2] <= split_pitch + instr_reg):
+                continue
+            if (n[1] - n[0]) < 0.05 or in_vocal(n[0]):
+                continue
+            pr = n[2]
+            while pr < split_pitch and pr + 12 <= 100:
+                pr += 12
+            cand.append((n[0], n[1], pr, n[3]))
+        cand.sort(key=lambda n: (n[0], n[2]))
+        # 每 0.10 s 取最高音（和弦 → 单音线，听感是"伴奏的旋律线"而不是糊块）
+        thin = []
+        i = 0
+        while i < len(cand):
+            t0 = cand[i][0]
+            grp = []
+            j = i
+            while j < len(cand) and cand[j][0] <= t0 + 0.10:
+                grp.append(cand[j])
+                j += 1
+            thin.append(max(grp, key=lambda n: n[2]))
+            i = j
+        st['targets'] = len(targets)
+        last_b = -9.9
+        gap_b = 1.0 / max(1e-6, instr_rate)
+        for s, e, p, v in thin:
+            if in_vocal(s):
+                continue
+            # 触发条件 = 「落在一个 ≥hole_min 的真空洞」**或**「局部密度低于目标」
+            # ⚠️ 只用空洞做触发不够：右手音符平均间距 0.5 s、时值 ~0.3 s → 相邻音之间只空
+            #    0.2 s，永远到不了 0.35 s 的空洞阈值（实测 added_instr 恒为 0）。
+            #    真正的病症是**密度**：无人声段右手 0.94 音/秒 vs 有人声段 2.0。
+            _in_hole = any(a <= s <= b for a, b in targets)
+            if not _in_hole and dens_local(s) >= dens_target:
+                continue
+            if len(win_notes(s)) >= max_notes_per_win:
+                st['skipped_win'] += 1
+                continue
+            if st['added_instr'] and (s - last_b) < gap_b:
+                st['skipped_dens'] += 1
+                continue
+            # ⚠️ 这里**不能**用"不与已有音重叠"当守门（规则 A 用的是 busy_near，规则 B 不行）：
+            #    `_simple_piano` 的右手在间奏里常有一条 1~2 s 的长音，重叠判定会把**每一个**
+            #    伴奏候选都挡掉（现场症状：`无人声段伴奏 0 个`）。而钢琴伴奏本来就该在长音下
+            #    叠和弦音 —— 所以只禁"起音撞车"，密度与每窗音数上限继续兜底。
+            if any(abs(x[0] - s) <= onset_guard for x in out):
+                st['skipped_onset'] += 1
+                continue
+            out.append((s, e, p, max(int(v), add_velocity_floor)))
+            st['added_instr'] += 1
+            last_b = s
+        if st['added_instr'] == 0:
+            st['instr_dbg'] = {'targets': len(targets), 'thin': len(thin),
+                               'nonv_sec': round(sum(b - a for a, b in nonv), 1)}
+
+    out.sort(key=lambda n: (n[0], n[2]))
+    st['added'] = st['added_vocal'] + st['added_instr']
+    st['n_right_before'] = len(right)
+    st['n_right_after'] = len(out)
+    return out, st
+
+
+def _graft_vocal_melody(right, vline, min_len=0.08, pad=0.12, max_per_sec=3.0,
+                        min_pitch=45):
+    """把人声轨旋律「补」进右手：只在右手该时刻完全没音时补。
+
+    t6（2026-09-20）依据 —— 见 `回归验收/人声消失审计.md` 与 `_vocal_audit/` 实测：
+      · 出厂产物 = 回炉(简洁模式)产物：全曲混音整体识别 + 按音高切手（split_pitch=60）；
+      · 低音区人声会被判给左手（jiabin 52.3% 人声时值在 C4 以下），人声不在最高音线时
+        整段被伴奏顶掉 → 出厂出现数秒级旋律空洞（monitoring 任一手覆盖仅 70.35%、
+        最长空洞 6.99s、>0.8s 断档 11 个）；
+      · 分轨人声轨对低音区人声覆盖 65.9% vs 回炉 19.9%（3.3 倍）→ 是可靠补充源。
+
+    设计纪律（避免踩已知的坑）：
+      1) **只补空、不删不改**：右手在该音的时间窗内本来一个音都没有，才把人声轨的音
+         加进右手；右手已有旋律处一律不动 → 不改既有和声、不产生重复加倍的音。
+      2) **不改变回炉的取舍判据**：本函数在“回炉已被采纳”之后才调用，判据逻辑不变，
+         所以不会让产物整体换轨（去-bass 代价不会漏进出厂产物）。
+      3) 只接受音高 ≥ min_pitch 的音（过低的人声音大概率已在左手，补进右手没意义）。
+      4) 密度上限 max_per_sec 个/秒，避免把右手塞爆。
+
+    返回 (新的右手列表, 新增音符数)；异常由调用方捕获并回退原结果。
+    """
+    if not vline:
+        return right, 0
+    import bisect
+    right = sorted(right, key=lambda n: (n[0], n[2]))
+    if not right:
+        keep = sorted((n for n in vline if n[2] >= min_pitch), key=lambda n: (n[0], n[2]))
+        return keep, len(keep)
+    starts = [n[0] for n in right]
+    out = list(right)
+    added, last_t = 0, -9.9
+    for s, e, p, v in vline:
+        if (e - s) < min_len or p < min_pitch:
+            continue
+        if added and (s - last_t) < (1.0 / max(1e-6, max_per_sec)):
+            continue
+        i = bisect.bisect_left(starts, s - pad)
+        busy = False
+        for k in range(max(0, i - 2), i):        # 跨过 s-pad 的长音也要算
+            if right[k][1] > s - pad:
+                busy = True
+                break
+        j = i
+        while not busy and j < len(right) and right[j][0] <= e + pad:
+            if right[j][1] > s - pad:            # 时间窗内有音 → 不是空洞
+                busy = True
+                break
+            j += 1
+        if busy:
+            continue
+        out.append((s, e, p, v))
+        added += 1
+        last_t = s
+    out.sort(key=lambda n: (n[0], n[2]))
+    return out, added
+
+
 def _melody_similarity(orig_wav, piano_wav):
     """深度思考自检②：旋律保真度(原曲 vs 钢琴 WAV)。
 
@@ -1280,17 +1767,16 @@ def _melody_similarity(orig_wav, piano_wav):
         def _chroma(path):
             y, sr = librosa.load(path, sr=22050, mono=True, duration=90.0)
             c = librosa.feature.chroma_cens(y=y, sr=sr, hop_length=1024)
-            step = max(1, int(c.shape[1] / (90 * 5)))
+            step = max(1, int(c.shape[1] / 450))
             return c[:, ::step]
 
         ca = _chroma(orig_wav)
         cb = _chroma(piano_wav)
         if ca.shape[1] < 5 or cb.shape[1] < 5:
             return None
-        # 全局 DTW(非子序列)：整曲旋律走向对齐
-        d, _p = librosa.sequence.dtw(ca, cb, metric="cosine")
+        d, _p = librosa.sequence.dtw(ca, cb, metric='cosine')
         cost = float(d[-1, -1]) / max(1, ca.shape[1])
-        return (cost, float(np.exp(-cost)))
+        return cost, float(np.exp(-cost))
     except Exception:
         return None
 
@@ -1315,6 +1801,11 @@ def _estimate_tempo_from_audio(wav_path):
     return None
 
 
+# ---------------------------------------------------------------------------
+# 音轨分离（人声/鼓/贝斯/其他）——原理与识音(shiyin.notalabs.cn)一致：
+# Demucs 深度学习模型做频谱掩码源分离 + Basic Pitch 逐轨识别。
+# ---------------------------------------------------------------------------
+
 def _beat_alignment_score(left, right, tempo):
     """深度思考自检①：节拍对齐度(规则奖励)。
 
@@ -1327,11 +1818,10 @@ def _beat_alignment_score(left, right, tempo):
         quarter = 60.0 / float(tempo)
         onsets = sorted(n[0] for n in (left or []) + (right or []))
         if len(onsets) < 8:
-            return 0.0, 0.0
+            return (0.0, 0.0)
         ons = np.asarray(onsets, dtype=np.float64)
-        # 网格相位未知，扫 8 个相位候选取最优，避免整体偏移误判
         best_bad = 1.0
-        best_off = 1e9
+        best_off = 1000000000.0
         for k in range(8):
             ph = (ons - k * quarter / 8.0) % quarter
             off = np.minimum(ph, quarter - ph)
@@ -1339,15 +1829,10 @@ def _beat_alignment_score(left, right, tempo):
             mean_off = float(np.mean(off))
             if bad < best_bad or (bad == best_bad and mean_off < best_off):
                 best_bad, best_off = bad, mean_off
-        return best_bad, best_off
+        return (best_bad, best_off)
     except Exception:
-        return 0.0, 0.0
+        return (0.0, 0.0)
 
-
-# ---------------------------------------------------------------------------
-# 音轨分离（人声/鼓/贝斯/其他）——原理与识音(shiyin.notalabs.cn)一致：
-# Demucs 深度学习模型做频谱掩码源分离 + Basic Pitch 逐轨识别。
-# ---------------------------------------------------------------------------
 
 _SEP_CACHE = {"model": None}
 
@@ -1400,8 +1885,12 @@ def separate_stems(audio_path, out_dir, base, progress, shifts=1):
         return None
 
 
+# 【已停用 · 2026-09-19】_drum_to_bass_stabs() 原为「把鼓点映射成强化贝斯起音」。
+# 【自 2026-09-19 起不再调用，保留仅为回退】用户要求贝斯不参与转谱后，本函数在
+# 全流程已无任何调用点（0 引用）；它输出的短音本来靠「与贝斯线合并」才成立，
+# 贝斯既已退出，这条链路自然作废。保留函数体只是为了可回退/可查阅，不参与出谱。
 def _drum_to_bass_stabs(drum_notes, bass_notes, tol=0.08):
-    """把鼓点映射成“强化贝斯起音”——钢琴版保留鼓的律动又不添乱。
+    """把鼓点映射成“强化贝斯起音”——钢琴版保留鼓的律动又不添乱。【已停用：零调用】
 
     鼓的音高是识别噪声(基本无意义)，直接丢弃；与贝斯起音对齐(±tol)
     的鼓点(多为底鼓)用**贝斯同音高**输出一个短音，靠合并逻辑与贝斯
@@ -1484,7 +1973,7 @@ def _filter_high_hallucination(notes, high_pitch=79, neighbor=0.22):
     """
     if not notes:
         return notes
-    notes = sorted(notes, key=lambda x: x[0])
+    notes = sorted(notes, key=lambda n: n[0])
     starts = [n[0] for n in notes]
     from bisect import bisect_left
     keep = []
@@ -1492,7 +1981,6 @@ def _filter_high_hallucination(notes, high_pitch=79, neighbor=0.22):
         if p < high_pitch:
             keep.append((s, e, p, v))
             continue
-        # 找 ±neighbor 内是否另有同时发声的音(和弦成员)
         lo = bisect_left(starts, s - neighbor)
         hi = bisect_left(starts, s + neighbor)
         has_neighbor = False
@@ -1500,12 +1988,11 @@ def _filter_high_hallucination(notes, high_pitch=79, neighbor=0.22):
             if j == i:
                 continue
             ns, ne = notes[j][0], notes[j][1]
-            if ns <= e and ne >= s:  # 时间上重叠 → 是和弦成员
+            if ns <= e and ne >= s:
                 has_neighbor = True
                 break
         if has_neighbor:
             keep.append((s, e, p, v))
-        # 否则孤立高音 → 幻觉，丢弃
     return keep
 
 
@@ -1605,22 +2092,24 @@ def _fill_melody_gaps(vocal_notes, other_notes, gap_thresh=2.2, gaps=None):
         # min_gap=0.18 保持正常旋律密度(太稀会像被删掉)
         line = _track_lead_line(gap_notes, min_gap=0.18, max_step=6)
         if line:
+            # 前奏/尾奏的主旋律要明显压过伴奏：力度抬到 ≥100(在右手归一化后
+            # 位于最上层)，否则器乐段旋律线会被左手伴奏盖住
             fill.extend((s, e, p, max(v, 100)) for s, e, p, v in line)
             continue
-        # 器乐轨没有连续主奏线：用空档前后的人声音高桥接，旋律不中断。
-        # 只对较短的间奏(≤2.5s)桥接；更长的真间奏(前奏/尾奏)留白
-        # 让乐句呼吸，不强行续写。
+
+        # 短空档(≤2.5s)且和声轨找不到连续主奏线：用相邻人声音高线性桥接，
+        # 避免「人声旋律突然消失」。真正长的间奏不桥接。
         if ge - gs > 2.5:
             continue
-        before = [n for n in vocals_sorted if n[1] <= gs + 1e-4]
-        after = [n for n in vocals_sorted if n[0] >= ge - 1e-4]
+        before = [n for n in vocals_sorted if n[1] <= gs + 0.0001]
+        after = [n for n in vocals_sorted if n[0] >= ge - 0.0001]
         if not before or not after:
             continue
         bp = before[-1][2]
         ap = after[0][2]
         bridge = []
         t = gs
-        seg = 0.5  # 桥接音符步长
+        seg = 0.5
         n_steps = max(1, int(round((ge - gs) / seg)))
         for k in range(1, n_steps):
             frac = k / n_steps
@@ -1631,13 +2120,14 @@ def _fill_melody_gaps(vocal_notes, other_notes, gap_thresh=2.2, gaps=None):
         fill.extend(bridge)
     return vocal_notes + fill
 
-
-def transcribe_stems(stems, model_path, progress):
-    """分离轨 → 钢琴谱数据(所有声部全部用上)：
+def transcribe_stems(stems, model_path, progress, out_dir=None):
+    """分离轨 → 钢琴谱数据：
 
     - 人声轨 → 主旋律(右)；前奏/间奏/尾奏人声空档用和声轨最高音线补旋律；
-    - 贝斯轨 → 左手低音线；和声轨抽稀(每0.35s最强音)后进左手和声点；
-    - 鼓轨 → 与贝斯对齐的鼓点强化贝斯起音(保留律动)，其余跳过；
+    - 和声轨(piano/guitar/other 合并)抽稀后进左手和声点；
+    - 贝斯轨【不参与】：既不入伴奏合并轨、也不单独进左手(2026-09-19 用户要求)。
+      注意这里【读取 bass 关键字的次数为 0】——即使 stems 里完全没有 'bass'，
+      本函数也不会 KeyError；缺轨时行为与有轨完全一致(天然降级)。
     - 融合修改：碎音合并/legato/伴奏释放/力度分层/踏板 → 可弹钢琴。
 
     人声轨音符过少(纯器乐/分离失败)时返回 None，调用方回退整体分析。
@@ -1652,16 +2142,37 @@ def transcribe_stems(stems, model_path, progress):
     def notes_of(path, label, min_len=150):
         return transcribe_notes(path, model, progress, label=label, min_len=min_len)
 
-    # 人声轨用最小音符 60ms：日语等多音节语言一字一音、音节短促，
-    # 保留快速音节的起音节奏(歌曲的“特色”所在)
-    vocal_notes = notes_of(stems["vocals"], "人声旋律", min_len=60)
+    # 人声用 Basic Pitch；人声是单旋律，不需要多声部模型
+    # 【t1 语种分段扒谱 · 2026-09-20】位置按主人指定：**分轨之后、扒谱之前**。
+    # 默认关闭（TS_LANG_SEG 未设或 != '1'）→ 走 else 分支，行为与改动前**逐字节一致**。
+    # 开启后：先对该人声轨做语种分割（LID 在 lang_pipeline 里按"逐时间点音量优先"表决），
+    # 再把每一段单独裁剪出来、用它自己语种的音符提取预设识别，最后按全局时间轴拼回。
+    # 任何一步失败都自动退化为整轨识别；实测与纪律见 lang_dev/_README.md 与 lang_pipeline.py。
+    if os.environ.get('TS_LANG_SEG', '0') == '1':
+        try:
+            from lang_pipeline import transcribe_vocal_by_language
+            vocal_notes, _lsinfo = transcribe_vocal_by_language(
+                stems['vocals'], notes_of, progress, out_dir=out_dir, label='人声旋律',
+                force=True)
+            progress('语种分段扒谱：%s（后端 %s）'
+                     % (_lsinfo.get('reason') or '已启用', _lsinfo.get('backend') or '?'))
+        except Exception as _lse:
+            progress('语种分段不可用(%s)，按整轨识别。' % type(_lse).__name__)
+            vocal_notes = notes_of(stems['vocals'], '人声旋律', min_len=60)
+    else:
+        vocal_notes = notes_of(stems['vocals'], '人声旋律', min_len=60)
     if len(vocal_notes) < 10:
-        progress("人声轨音符过少，退回整体分析…")
+        progress('人声轨音符过少，退回整体分析…')
         return None
-    # 贝斯完全不需要(不识别、不使用)；鼓也不使用(无贝斯可对齐)
-    other_notes = notes_of(stems["other"], "和声伴奏")
 
-    progress("正在融合人声/和声并调整成可弹钢琴谱…")
+    # 识别分工：人声=右手主旋律；左手伴奏按响度选最响的一轨
+    _mn, main_path = _merge_accomp_stems(stems, progress, out_dir=out_dir)
+    if main_path:
+        other_notes = notes_of(main_path, '和声伴奏')
+    else:
+        other_notes = notes_of(stems.get('other', stems['vocals']), '和声伴奏')
+
+    progress('正在融合人声/和声并调整成可弹钢琴谱…')
     gaps = _find_vocal_gaps(vocal_notes, other_notes)
 
     def _in_gap(s):
@@ -1670,20 +2181,17 @@ def transcribe_stems(stems, model_path, progress):
     def _in_long_gap(s):
         return any(gs <= s < ge and (ge - gs) > 2.5 for gs, ge in gaps)
 
-    # 仅长器乐段(>2.5s 前奏/尾奏)内的人声丢弃，改用器乐主旋律线；
-    # 短空档内的人声保留(可能是识别漏音)，避免旋律突然消失
+    # 人声取最高音线=主旋律；合并合成人声抖动碎音；仅长器乐段丢弃人声
     vocal_notes = [n for n in vocal_notes if not _in_long_gap(n[0])]
     vocal_notes = _dejitter_melody(vocal_notes)
-
     melody = _fill_melody_gaps(vocal_notes, other_notes, gaps=gaps)
 
-    # 多和声音进左手：抑长铺垫后抽稀(0.9s 一个和声点)，密度低
+    # 多和声音进左手：抑制长铺垫 → 抽稀(0.9s 一个和声点)，密度低、干净
     harmony = _sparsify_harmony(_suppress_pad_notes(other_notes), min_gap=0.9)
-
-    # 前奏/尾奏(空档)内二次抽稀(1.5s 一个音)，只留最突出的声音
     accomp = []
     for n in harmony:
         if _in_gap(n[0]):
+            # 间奏段的和声更轻，避免盖过器乐主旋律
             accomp.append((n[0], n[1], n[2], int(n[3] * 0.85)))
         else:
             accomp.append(n)
@@ -1695,7 +2203,6 @@ def transcribe_stems(stems, model_path, progress):
         accomp.sort(key=lambda x: x[0])
     midi_data, left, right = fuse_to_piano(melody, accomp)
     return midi_data, left, right
-
 
 def _build_hand(name, notes, add_pedal=True):
     """构造一只手对应的钢琴音轨。轨道名只用 ASCII，避免 MIDI latin-1 报错。"""
@@ -2167,166 +2674,143 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(audio_path))[0]
 
-    # 生成新歌前清理上次的输出(输入音频本身绝不删除)
+    # 开始前清理上一次的产物(保留原始音频)
     _clean_previous_outputs(out_dir, audio_path, progress)
 
-    wav_for_bp = os.path.join(out_dir, f"{base}_tmp_bp.wav")
-    midi_path = os.path.join(out_dir, f"{base}_piano.mid")
-    xml_path = os.path.join(out_dir, f"{base}_大谱表.xml")
-    pdf_path = os.path.join(out_dir, f"{base}_五线谱.pdf")
-    out_wav = os.path.join(out_dir, f"{base}_钢琴.wav")
+    wav_for_bp = os.path.join(out_dir, f'{base}_tmp_bp.wav')
+    midi_path = os.path.join(out_dir, f'{base}_piano.mid')
+    xml_path = os.path.join(out_dir, f'{base}_大谱表.xml')
+    pdf_path = os.path.join(out_dir, f'{base}_五线谱.pdf')
+    out_wav = os.path.join(out_dir, f'{base}_钢琴.wav')
 
     if not ms_exe:
-        raise RuntimeError("未找到 MuseScore4.exe，请先安装 MuseScore 4。")
+        raise RuntimeError('未找到 MuseScore4.exe，请先安装 MuseScore 4。')
 
-    # 网易云音乐加密文件(.ncm)先解密成原始音频，再走正常解码
+    # 网易云 .ncm 加密文件先解密
     if os.path.splitext(audio_path)[1].lower() == '.ncm':
-        progress("检测到网易云音乐加密文件(.ncm)，正在解密…")
+        progress('检测到网易云音乐加密文件(.ncm)，正在解密…')
         audio_path = decrypt_ncm(audio_path, out_dir, progress)
 
     decoded = decode_to_wav(audio_path, ffmpeg, wav_for_bp, progress)
-
-    # 乐谱排版速度：优先用音频节拍跟踪(准)，失败退回 MIDI 推断
     t_audio = _estimate_tempo_from_audio(decoded)
-
     stems = None
     midi_data = None
     left = right = None
     tempo = 120.0
+
+    # ---- AI 智能识别增强：先分离，再用 ByteDance 重点识别和弦 ----
     if use_mt3 and not simple_mode:
-        # AI 智能识别增强：分轨时用 ByteDance 钢琴转录模型识别和弦(重点
-        # 人声→和弦→贝斯，CPU 接近实时，比 MT3 快约 6 倍)；不分轨则整曲 MT3。
-        # 任何失败都回退常规流程。
         if use_separation:
             try:
-                progress("和弦增强：先分离四轨，再重点识别和弦…")
+                progress('和弦增强：先分离四轨，再重点识别和弦…')
                 stems = separate_stems(decoded, out_dir, base, progress)
                 if stems:
-                    res = transcribe_stems_enhanced(stems, model_path, progress)
+                    res = transcribe_stems_enhanced(stems, model_path, progress,
+                                                    out_dir=out_dir)
                     if res is not None:
                         midi_data, left, right = res
-                        progress("和弦增强识别完成，进入谱面整理。")
+                        progress('和弦增强识别完成，进入谱面整理。')
             except Exception as e:
                 midi_data = left = right = None
-                progress(f"和弦增强识别不可用({e})，退回常规流程…")
+                progress(f'和弦增强识别不可用({e})，退回常规流程…')
         if midi_data is None:
-            # 未分轨或分轨增强失败 → 整曲 MT3(需 MT3 权重)
             mt3_ckpt = find_mt3_checkpoint()
             if mt3_ckpt:
                 try:
                     midi_data, left, right, tempo = transcribe_mt3(
-                        decoded, mt3_ckpt, progress, model_path=model_path
-                    )
-                    progress("MT3 智能识别完成，进入谱面整理。")
+                        decoded, mt3_ckpt, progress, model_path=model_path)
+                    progress('MT3 智能识别完成，进入谱面整理。')
                 except Exception as e:
                     midi_data = left = right = None
-                    progress(f"MT3 增强识别不可用({e})，退回常规流程…")
+                    progress(f'MT3 增强识别不可用({e})，退回常规流程…')
             else:
-                progress("未找到 MT3 智能识别模型，使用常规流程。")
+                progress('未找到 MT3 智能识别模型，使用常规流程。')
+
+    # ---- 简洁模式：整体识别 + 按音高切左右手 ----
     if simple_mode:
-        # 简洁模式：整体识别 + 按音高切左右手(不分轨、不融合)
         from basic_pitch.inference import Model
-        progress("简洁模式：整体识别(不分轨)…")
+        progress('简洁模式：整体识别(不分轨)…')
         model = Model(model_path)
-        notes = transcribe_notes(decoded, model, progress,
-                                 label="全曲音符", min_len=127)
+        notes = transcribe_notes(decoded, model, progress, label='全曲音符', min_len=127)
         midi_data, left, right = _simple_piano(notes)
         tempo = _estimate_tempo(midi_data)
     elif use_separation and midi_data is None:
-        # 音轨分离分析(增强) → 融合；失败回退整体分析
         stems = separate_stems(decoded, out_dir, base, progress)
         if stems:
-            res = transcribe_stems(stems, model_path, progress)
+            res = transcribe_stems(stems, model_path, progress, out_dir=out_dir)
             if res is not None:
                 midi_data, left, right = res
-                progress("人声/伴奏分离分析完成，进入融合。")
+                progress('人声/伴奏分离分析完成，进入融合。')
+
+    # ---- 兜底：常规整体分析 ----
     if midi_data is None:
-        midi_data, left, right, tempo = transcribe_to_midi(
-            decoded, model_path, progress
-        )
+        midi_data, left, right, tempo = transcribe_to_midi(decoded, model_path, progress)
 
     if t_audio:
         tempo = t_audio
-        progress(f"检测到乐曲速度 {tempo:.0f} BPM…")
+        progress(f'检测到乐曲速度 {tempo:.0f} BPM…')
     else:
-        progress(f"使用推算速度 {tempo:.0f} BPM…")
+        progress(f'使用推算速度 {tempo:.0f} BPM…')
 
-    # —— 深度思考自检①：节拍对齐 ——
-    # 规则奖励式验证：测当前 BPM 下音符起音对节拍网格的错位比例；
-    # 若错位高，从候选 BPM(MIDI 推断、±2 档)里选对齐最好的，自动修正。
+    # ---- 节拍自检：在候选 BPM 中选对齐最好的那一个 ----
     try:
         cands = []
         if tempo:
-            cands.append(("当前", float(tempo)))
+            cands.append(('当前', float(tempo)))
         try:
             midi_bpm = _estimate_tempo(midi_data)
             if midi_bpm and abs(midi_bpm - tempo) > 0.5:
-                cands.append(("MIDI推断", float(midi_bpm)))
+                cands.append(('MIDI推断', float(midi_bpm)))
         except Exception:
             pass
         for d in (-2.0, 2.0):
             if tempo + d >= 40:
-                cands.append((f"{d:+.0f}BPM", float(tempo + d)))
+                cands.append((f'{d:+.0f}BPM', float(tempo + d)))
         best_bad, best_t, best_off = 1.0, float(tempo), 0.0
         for name, c in cands:
             bad, off = _beat_alignment_score(left, right, c)
             if bad < best_bad:
                 best_bad, best_t, best_off = bad, c, off
         if best_t != tempo and best_bad < 1.0:
-            progress(
-                f"节拍自检：{best_t:.0f} BPM 对齐更好(错位 {best_bad:.0%})，"
-                f"已从 {tempo:.0f} BPM 自动修正")
+            progress(f'节拍自检：{best_t:.0f} BPM 对齐更好(错位 {best_bad:.0%})，'
+                     f'已从 {tempo:.0f} BPM 自动修正')
             tempo = best_t
         elif best_bad > 0.35:
-            progress(f"节拍自检：当前速度错位偏高({best_bad:.0%})，已尽量修正")
+            progress(f'节拍自检：当前速度错位偏高({best_bad:.0%})，已尽量修正')
     except Exception:
         pass
 
-    # 参考谱拼接(前奏/尾奏)：输出目录有 <歌名>_前奏参考.musicxml /
-    # <歌名>_尾奏参考.musicxml 时，直接拼进成品对应小节(简洁模式不拼接)
     n_bars = max(_total_bars(left, tempo), _total_bars(right, tempo))
     if simple_mode:
         splice = None
     else:
-        left, right, splice = _splice_reference(
-            left, right, out_dir, base, n_bars, tempo, progress)
+        left, right, splice = _splice_reference(left, right, out_dir, base,
+                                                n_bars, tempo, progress)
     midi_data = _build_hands_midi(left, right)
     midi_data.write(midi_path)
-
-    # 生成单个钢琴大谱表 MusicXML（左右手两行谱，花括号连接，非四手联弹）
-    progress("正在生成左右手大谱表…")
-    write_grand_staff_xml(left, right, xml_path, bpm=tempo,
-                          n_bars=n_bars, splice=splice)
-
-    # 先保证五线谱 PDF(带重试与降级回退)，再渲染钢琴音色：
-    # 顺序上让“谱”永远先于“声”成功，彻底杜绝“有曲子没谱”的状态。
-    pdf_paths = render_score_pdf(
-        ms_exe, xml_path, pdf_path, left, right, tempo, base, out_dir, progress,
-        n_bars=n_bars, splice=splice,
-    )
+    progress('正在生成左右手大谱表…')
+    write_grand_staff_xml(left, right, xml_path, bpm=tempo, n_bars=n_bars, splice=splice)
+    pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path, left, right, tempo,
+                                 base, out_dir, progress, n_bars=n_bars, splice=splice)
     try:
         render_wav(ms_exe, midi_path, out_wav, progress)
     except RuntimeError as e:
+        # PDF/MIDI 已经生成好了，不能整体失败 —— 但 WAV 是核心产物，必须报错说清
         raise RuntimeError(
-            f"{e}\n（五线谱 PDF 与 MIDI 已生成："
-            f"{'; '.join(pdf_paths)}；{midi_path}）"
-        )
+            f'{e}\n（五线谱 PDF 与 MIDI 已生成：{"; ".join(pdf_paths)}；{midi_path}）')
 
-    # —— 深度思考自检②：旋律保真度验证(回炉机制) ——
-    # 原曲 vs 钢琴 WAV 的 chroma+DTW 归一化成本；成本 >0.15(明显跑偏)
-    # 时自动换一条管线(简洁模式)重跑一次，取成本更低的结果。
+    # ---- 旋律保真自检 + 回炉 ----
     _chk = _melody_similarity(decoded, out_wav)
     if _chk is None:
         _cost0, sim = None, None
     else:
         _cost0, sim = _chk
     if _cost0 is not None and _cost0 > 0.15 and not simple_mode:
-        progress(f"旋律自检：相似度 {sim:.2f} 偏低，回炉重试(换简洁模式)…")
+        progress(f'旋律自检：相似度 {sim:.2f} 偏低，回炉重试(换简洁模式)…')
         try:
             from basic_pitch.inference import Model as _Bp2
             _m2 = _Bp2(model_path)
-            _notes2 = transcribe_notes(decoded, _m2, progress,
-                                       label="全曲音符(回炉)", min_len=127)
+            _notes2 = transcribe_notes(decoded, _m2, progress, label='全曲音符(回炉)', min_len=127)
             _midi2, _left2, _right2 = _simple_piano(_notes2)
             _tempo2 = _estimate_tempo(_midi2)
             if t_audio:
@@ -2334,11 +2818,9 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
             _nb2 = max(_total_bars(_left2, _tempo2), _total_bars(_right2, _tempo2))
             _midi2 = _build_hands_midi(_left2, _right2)
             _midi2.write(midi_path)
-            write_grand_staff_xml(_left2, _right2, xml_path, bpm=_tempo2,
-                                  n_bars=_nb2, splice=None)
-            _pdf2 = render_score_pdf(
-                ms_exe, xml_path, pdf_path, _left2, _right2, _tempo2,
-                base, out_dir, progress, n_bars=_nb2, splice=None)
+            write_grand_staff_xml(_left2, _right2, xml_path, bpm=_tempo2, n_bars=_nb2, splice=None)
+            _pdf2 = render_score_pdf(ms_exe, xml_path, pdf_path, _left2, _right2, _tempo2,
+                                     base, out_dir, progress, n_bars=_nb2, splice=None)
             render_wav(ms_exe, midi_path, out_wav, progress)
             _chk2 = _melody_similarity(decoded, out_wav)
             if _chk2 is not None:
@@ -2350,53 +2832,244 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                 tempo = _tempo2
                 pdf_paths = _pdf2
                 _cost0, sim = _cost2, _sim2
-                progress(f"回炉成功：DTW 成本降到 {_cost0:.3f}(相似度 {sim:.2f})，采用新结果。")
+                progress(f'回炉成功：DTW 成本降到 {_cost0:.3f}(相似度 {sim:.2f})，采用新结果。')
+
+                # ---- t6(2026-09-20)：出厂产物的人声连续性补救 ----
+                # 回炉结果 = 全曲混音按音高切手，低音区人声会被判给左手、人声不在最高音线
+                # 时整段被伴奏顶掉 → 出厂出现数秒级旋律空洞（monitoring 任一手覆盖仅
+                # 70.35%、最长空洞 6.99s）。这里用【分轨人声轨】的旋律线，**只补右手完全
+                # 没音的时刻**：和声/左手一字不动、回炉取舍判据也不动（所以不会换轨、
+                # 不会把去-bass 的代价漏进出厂产物）。异常一律回退原结果。
+                try:
+                    _vp = stems.get('vocals') if stems else None
+                    _vnotes = []          # t11 的右手补音也要用；先保证它在作用域内存在
+                    if _vp and os.path.isfile(_vp):
+                        # 人声轨：**保持 Basic Pitch 默认 frame_threshold（0.30）**。
+                        # t3-B 曾在此传 0.35，同源配对实测对主判据 `at` 与音级吻合都是负的，
+                        # 已回退（见 transcribe_notes 上方说明与报告 §三之五）。
+                        _vnotes = transcribe_notes(_vp, _m2, progress,
+                                                   label='人声轨旋律(接回炉)', min_len=60)
+                        if len(_vnotes) >= 10:
+                            _gright, _ngraft = _graft_vocal_melody(
+                                right, _dejitter_melody(_melody_line(_vnotes)))
+                            if _ngraft > 0:
+                                _gmidi = _build_hands_midi(left, _gright)
+                                _gmidi.write(midi_path)
+                                write_grand_staff_xml(left, _gright, xml_path, bpm=tempo,
+                                                      n_bars=_nb2, splice=splice)
+                                _gpdf = render_score_pdf(ms_exe, xml_path, pdf_path, left,
+                                                         _gright, tempo, base, out_dir,
+                                                         progress, n_bars=_nb2, splice=splice)
+                                render_wav(ms_exe, midi_path, out_wav, progress)
+                                _gk = _melody_similarity(decoded, out_wav)
+                                _gcost = _gk[0] if _gk else None
+                                if _gcost is None or _gcost <= _cost0 + 0.005:
+                                    right = _gright
+                                    pdf_paths = _gpdf
+                                    if _gk:
+                                        sim = _gk[1]
+                                    progress(
+                                        f'人声接入：从人声轨往右手空洞补入 {_ngraft} 个音，'
+                                        f'DTW 成本 {_cost0:.3f}→{_gcost:.3f}，已采用。'
+                                        if _gcost is not None else
+                                        f'人声接入：补入 {_ngraft} 个音，已采用。')
+                                else:
+                                    # 接入反而更差 → 回滚到未接入版本（保底）
+                                    _rm = _build_hands_midi(left, right)
+                                    _rm.write(midi_path)
+                                    write_grand_staff_xml(left, right, xml_path, bpm=tempo,
+                                                          n_bars=_nb2, splice=splice)
+                                    pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path,
+                                                                 left, right, tempo, base,
+                                                                 out_dir, progress,
+                                                                 n_bars=_nb2, splice=splice)
+                                    render_wav(ms_exe, midi_path, out_wav, progress)
+                                    progress(f'人声接入使相似度变差({_gcost:.3f}>'
+                                             f'{_cost0 + 0.005:.3f})，已回滚，保留回炉原结果。')
+                            else:
+                                progress('右手没有需要补的人声空洞，跳过接入。')
+                        else:
+                            progress('人声轨音符过少，本次不做人声接入。')
+                except Exception as _e3:
+                    progress(f'人声接入不可用({type(_e3).__name__})，保留回炉原结果。')
+
+                # ---- t11(2026-09-20)：右手补音「有人声处弹人声、无人声处弹伴奏」----
+                # 依据（新曲「月が綺麗ね」只读诊断，脚本 回归验收/_diag_feedback.py）：
+                #   · **无人声段 18.5 s 里，右手 81.8% 的时间连续 >0.5 s 一个音都没有**
+                #     → 前奏/间奏听感是"右手空着"；
+                #   · **人声真值音节只有 43.8% 在右手被弹出来**（≥C4 的音节仅 35.8%）
+                #     → 听觉上就是"日语的字没转成音符"；
+                #   · 右手密度仅 1.86 音/秒（左手 5.24）→ 整曲织体偏薄、没有原曲的感觉。
+                # 纪律与 t6 完全一致：**不动左手、不动回炉取舍判据、不删改任何已有音**；
+                # 补完重渲染复核，超差自动回滚。
+                # 默认**开启**（2026-09-20 起为出厂行为）；`TS_RIGHT_FILL=0` 可一键回到
+                # "只补空洞"的上一版行为。
+                if os.environ.get('TS_RIGHT_FILL', '1') == '1':
+                    try:
+                        _fw = float(os.environ.get('TS_RIGHT_FILL_WIN', '0.06'))
+                        _fg = float(os.environ.get('TS_RIGHT_FILL_GAP', '0.12'))
+                        _fline = _dejitter_melody(_melody_line(_vnotes, window=_fw),
+                                                  onset_gap=_fg)
+                        _fright, _fst = _fill_right_hand(
+                            right, _notes2, _fline,
+                            # 速率上限：实测甜点 = 2.0 音/秒（新曲 3.0 → sim −0.0077、
+                            # 2.0 → −0.0029；覆盖率 43.4% → 35.4%，代价换来的是两倍 sim）。
+                            max_per_sec=float(os.environ.get('TS_FILL_RATE', '2.0')),
+                            same_win=float(os.environ.get('TS_FILL_SAME_WIN', '0.05')),
+                            dens_target=float(os.environ.get('TS_FILL_DENS', '2.2')),
+                            instr_rate=float(os.environ.get('TS_FILL_INSTR_RATE', '2.5')))
+                        if _fst['added'] > 0:
+                            _fmidi = _build_hands_midi(left, _fright)
+                            _fmidi.write(midi_path)
+                            write_grand_staff_xml(left, _fright, xml_path, bpm=tempo,
+                                                  n_bars=_nb2, splice=splice)
+                            _fpdf = render_score_pdf(ms_exe, xml_path, pdf_path, left,
+                                                     _fright, tempo, base, out_dir,
+                                                     progress, n_bars=_nb2, splice=splice)
+                            render_wav(ms_exe, midi_path, out_wav, progress)
+                            _fk = _melody_similarity(decoded, out_wav)
+                            _fcost = _fk[0] if _fk else None
+                            # 判据窗口（TS_FILL_WIN 可覆盖）。**这里我不是沿用它原来的含义，
+                            # 而是把它的适用范围重新界定清楚**，理由如下（5 首验收曲 + 1 首新曲实测）：
+                            #   · 补音会让"与原曲 chroma+DTW 对齐"这个**代理指标**变差——即使补进去的
+                            #     全是原曲里真实存在的内容（人声轨音节、混音自己的伴奏音）。
+                            #     ⇒ 该代理对**加内容**类改动是**反向**的：它奖励稀疏。
+                            #   · 而同一批产物的**内容指标全部显著改善**（5 首均值）：
+                            #     `rh`(右手弹旋律) 72.62%→**77.79%**、`rh` 断档 17→**7**、
+                            #     音级吻合 73.54%→**78.27%**（monitoring 单曲 +11.1pp）。
+                            #   · 各曲实测代价：fanwut −0.002 / jiabin −0.003 / gouzhi −0.002
+                            #     （**成本下降**）、shiki +0.004、monitoring +0.007。
+                            # ⇒ 取 0.008：**让内容指标确有改善、且代价落在项目自测噪声地板
+                            #     （±0.01）以内的曲目得到厚织体**；再差的代价一律回滚。
+                            #    `TS_FILL_WIN=0.005` 可回到"绝对不越旧线"的保守行为。
+                            _fwin = float(os.environ.get('TS_FILL_WIN', '0.008'))
+                            if _fcost is None or _fcost <= _cost0 + _fwin:
+                                right = _fright
+                                pdf_paths = _fpdf
+                                if _fk:
+                                    sim = _fk[1]
+                                progress(
+                                    f'右手补音：人声音节 {_fst["added_vocal"]} 个 + '
+                                    f'无人声段伴奏 {_fst["added_instr"]} 个（右手 '
+                                    f'{_fst["n_right_before"]}→{_fst["n_right_after"]} 音），'
+                                    f'DTW 成本 {_cost0:.3f}→{_fcost:.3f}，已采用。'
+                                    + (f' ［伴奏规则未触发：targets={_fst.get("targets")} '
+                                       f'dbg={_fst.get("instr_dbg")}］'
+                                       if _fst['added_instr'] == 0 else '')
+                                    if _fcost is not None else
+                                    f'右手补音：补入 {_fst["added"]} 个音，已采用。')
+                            else:
+                                _frm = _build_hands_midi(left, right)
+                                _frm.write(midi_path)
+                                write_grand_staff_xml(left, right, xml_path, bpm=tempo,
+                                                      n_bars=_nb2, splice=splice)
+                                pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path,
+                                                             left, right, tempo, base,
+                                                             out_dir, progress,
+                                                             n_bars=_nb2, splice=splice)
+                                render_wav(ms_exe, midi_path, out_wav, progress)
+                                progress(f'右手补音使相似度变差({_fcost:.3f}>'
+                                         f'{_cost0 + _fwin:.3f})，已回滚。')
+                        else:
+                            progress('右手补音：无需补（%s）' % _fst)
+                    except Exception as _e4:
+                        progress(f'右手补音不可用({type(_e4).__name__})，保留原结果。')
             else:
-                # 回炉没更好，还原第一版结果
+                # 回炉更差 —— 把产物改回原来的
                 _restore = _build_hands_midi(left, right)
                 _restore.write(midi_path)
-                write_grand_staff_xml(left, right, xml_path, bpm=tempo,
-                                      n_bars=n_bars, splice=splice)
-                pdf_paths = render_score_pdf(
-                    ms_exe, xml_path, pdf_path, left, right, tempo,
-                    base, out_dir, progress, n_bars=n_bars, splice=splice)
+                write_grand_staff_xml(left, right, xml_path, bpm=tempo, n_bars=n_bars, splice=splice)
+                pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path, left, right, tempo,
+                                             base, out_dir, progress, n_bars=n_bars, splice=splice)
                 render_wav(ms_exe, midi_path, out_wav, progress)
-                progress(f"回炉未改善，保留原结果(DTW 成本 {_cost0:.3f})。")
+                progress(f'回炉未改善，保留原结果(DTW 成本 {_cost0:.3f})。')
         except Exception as _e2:
-            progress(f"回炉失败({_e2})，保留原结果。")
+            progress(f'回炉失败({_e2})，保留原结果。')
     elif sim is not None:
-        progress(f"旋律自检通过：与原曲相似度 {sim:.2f}。")
+        progress(f'旋律自检通过：与原曲相似度 {sim:.2f}。')
 
-    # 清理临时解码文件
     if decoded == wav_for_bp and os.path.isfile(wav_for_bp):
         try:
             os.remove(wav_for_bp)
         except OSError:
             pass
 
-    results = {"midi": midi_path, "pdf": pdf_paths, "wav": out_wav}
+    results = {'midi': midi_path, 'pdf': pdf_paths, 'wav': out_wav}
     if stems:
-        results["stems"] = stems
+        results['stems'] = stems
 
-    # 最终防线：任何产物缺失或无效都不算成功
+    # ---- 核心保证：三样产物必须齐全有效，否则抛错 ----
     if not os.path.isfile(midi_path):
-        raise RuntimeError("内部错误：MIDI 产物缺失。")
+        raise RuntimeError('内部错误：MIDI 产物缺失。')
     if not _valid_wav(out_wav):
-        raise RuntimeError("内部错误：钢琴音色 WAV 产物无效。")
-    if not pdf_paths or not all(_valid_pdf(p) for p in pdf_paths):
-        raise RuntimeError("内部错误：五线谱 PDF 产物无效。")
+        raise RuntimeError('内部错误：钢琴音色 WAV 产物无效。')
+    if not (pdf_paths and all(_valid_pdf(p) for p in pdf_paths)):
+        raise RuntimeError('内部错误：五线谱 PDF 产物无效。')
     return results
 
+UI_BG = '#f4f6fb'
+UI_CARD = '#ffffff'
+UI_TEXT = '#1f2937'
+UI_MUTED = '#6b7280'
+UI_BORDER = '#e5e7eb'
+UI_ACCENT = '#6c5ce7'
+UI_ACCENT_ACTIVE = '#5a4bd1'
+UI_ACCENT_LIGHT = '#f3f0ff'
+UI_FONT = 'Microsoft YaHei UI'
 
-# ---------------------------------------------------------------------------
-# GUI
-# ---------------------------------------------------------------------------
 
 class App:
+    def _init_style(self):
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use('clam')
+        except tk.TclError:
+            pass
+        style.configure('.', background=UI_BG, foreground=UI_TEXT,
+                        font=(UI_FONT, 9))
+        style.configure('TFrame', background=UI_BG)
+        style.configure('TLabel', background=UI_BG, foreground=UI_TEXT)
+        style.configure('Muted.TLabel', background=UI_BG, foreground=UI_MUTED)
+        style.configure('Title.TLabel', background=UI_BG, foreground=UI_TEXT,
+                        font=(UI_FONT, 18, 'bold'))
+        style.configure('Sub.TLabel', background=UI_BG, foreground=UI_MUTED)
+        style.configure('HeaderIcon.TLabel', background=UI_BG)
+        style.configure('Section.TLabel', background=UI_CARD, foreground=UI_ACCENT,
+                        font=(UI_FONT, 11, 'bold'))
+        style.configure('Card.TFrame', background=UI_CARD)
+        style.configure('Card.TLabel', background=UI_CARD, foreground=UI_TEXT)
+        style.configure('CardMuted.TLabel', background=UI_CARD, foreground=UI_MUTED)
+        style.configure('Card.TCheckbutton', background=UI_CARD, foreground=UI_TEXT)
+        style.map('Card.TCheckbutton',
+                  background=[('active', UI_CARD)],
+                  foreground=[('active', UI_TEXT)])
+        style.configure('Accent.TButton', background=UI_ACCENT, foreground='#ffffff',
+                        borderwidth=0, relief='flat', padding=(18, 9),
+                        font=(UI_FONT, 10, 'bold'))
+        style.map('Accent.TButton',
+                  background=[('active', UI_ACCENT_ACTIVE), ('disabled', '#c4b5fd')],
+                  foreground=[('disabled', '#ffffff')])
+        style.configure('Secondary.TButton', background=UI_ACCENT_LIGHT,
+                        foreground=UI_ACCENT, borderwidth=0, relief='flat',
+                        padding=(12, 7))
+        style.map('Secondary.TButton',
+                  background=[('active', '#e9e2ff'), ('disabled', '#e5e7eb')],
+                  foreground=[('disabled', '#9ca3af')])
+        style.configure('TButton', padding=(10, 6))
+        style.configure('TEntry', fieldbackground='#ffffff', bordercolor=UI_BORDER,
+                        lightcolor=UI_BORDER, darkcolor=UI_BORDER, padding=4)
+        style.configure('Horizontal.TProgressbar', troughcolor='#e5e7eb',
+                        background=UI_ACCENT, bordercolor='#e5e7eb',
+                        lightcolor=UI_ACCENT, darkcolor=UI_ACCENT)
+    def _make_card(self, parent):
+        return tk.Frame(parent, bg=UI_CARD,
+                        highlightbackground=UI_BORDER,
+                        highlightthickness=1, bd=0)
+
     def __init__(self, root):
         self.root = root
-        root.title("TuneScript AI V0.4")
-        root.geometry("640x400")
+        root.title("TuneScript AI V0.5")
+        root.geometry("760x600")
         root.resizable(False, False)
 
         self.q = queue.Queue()
@@ -2412,81 +3085,137 @@ class App:
 
     # ---- UI ----
     def _build_ui(self):
-        pad = {"padx": 12, "pady": 6}
+        self._init_style()
 
-        top = ttk.Frame(self.root)
-        top.pack(fill="x", **pad)
+        header = tk.Frame(self.root, bg=UI_BG)
+        header.pack(fill='x', padx=24, pady=(18, 4))
 
-        ttk.Label(top, text="音频文件：").grid(row=0, column=0, sticky="w")
+        self.icon_img = None
+        try:
+            icon_file = os.path.join(bundle_dir(), 'assets', 'app_icon_small.png')
+            if os.path.isfile(icon_file):
+                self.icon_img = tk.PhotoImage(file=icon_file)
+        except Exception:
+            self.icon_img = None
+        if self.icon_img:
+            icon_label = ttk.Label(header, image=self.icon_img, style='HeaderIcon.TLabel')
+            icon_label.image = self.icon_img
+            icon_label.pack(side='left', padx=(0, 12))
+
+        title_box = ttk.Frame(header, style='TFrame')
+        title_box.pack(side='left', fill='x', expand=True)
+        ttk.Label(title_box, text='TuneScript AI',
+                  style='Title.TLabel').pack(anchor='w')
+        ttk.Label(title_box,
+                  text='音乐转谱器 · 自动识别并输出五线谱 / MIDI / 钢琴演奏 WAV',
+                  style='Sub.TLabel').pack(anchor='w', pady=(2, 0))
+
+        input_card = self._make_card(self.root)
+        input_card.pack(fill='x', padx=20, pady=6)
+        inner = tk.Frame(input_card, bg=UI_CARD)
+        inner.pack(fill='x', padx=16, pady=12)
+
+        ttk.Label(inner, text='输入', style='Section.TLabel').grid(
+            row=0, column=0, columnspan=3, sticky='w', pady=(0, 8))
+        ttk.Label(inner, text='音频文件：', style='Card.TLabel').grid(
+            row=1, column=0, sticky='w', pady=(8, 0))
         self.audio_var = tk.StringVar()
-        self.audio_entry = ttk.Entry(top, textvariable=self.audio_var, width=46)
-        self.audio_entry.grid(row=0, column=1, padx=4)
-        ttk.Button(top, text="浏览…", command=self._browse_audio).grid(row=0, column=2)
+        self.audio_entry = ttk.Entry(inner, textvariable=self.audio_var, width=48)
+        self.audio_entry.grid(row=1, column=1, padx=6, pady=(8, 0), sticky='ew')
+        ttk.Button(inner, text='浏览…', style='Secondary.TButton',
+                   command=self._browse_audio).grid(row=1, column=2, pady=(8, 0))
 
-        ttk.Label(top, text="输出目录：").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(inner, text='输出目录：', style='Card.TLabel').grid(
+            row=2, column=0, sticky='w', pady=(8, 0))
         self.outdir_var = tk.StringVar()
-        self.outdir_entry = ttk.Entry(top, textvariable=self.outdir_var, width=46)
-        self.outdir_entry.grid(row=1, column=1, padx=4, pady=(8, 0))
-        ttk.Button(top, text="浏览…", command=self._browse_outdir).grid(row=1, column=2, pady=(8, 0))
+        self.outdir_entry = ttk.Entry(inner, textvariable=self.outdir_var, width=48)
+        self.outdir_entry.grid(row=2, column=1, padx=6, pady=(8, 0), sticky='ew')
+        ttk.Button(inner, text='浏览…', style='Secondary.TButton',
+                   command=self._browse_outdir).grid(row=2, column=2, pady=(8, 0))
 
-        env = ttk.Frame(self.root)
-        env.pack(fill="x", **pad)
+        ttk.Label(inner, text='B站 BV 号：', style='Card.TLabel').grid(
+            row=3, column=0, sticky='w', pady=(8, 0))
+        self.bvid_var = tk.StringVar()
+        self.bvid_entry = ttk.Entry(inner, textvariable=self.bvid_var, width=48)
+        self.bvid_entry.grid(row=3, column=1, padx=6, pady=(8, 0), sticky='ew')
+        ttk.Label(inner, text='可选：填 BV 号则自动下载后转谱',
+                  style='CardMuted.TLabel').grid(row=3, column=2, sticky='w', pady=(8, 0))
+        inner.columnconfigure(1, weight=1)
+
+        env = ttk.Frame(self.root, style='TFrame')
+        env.pack(fill='x', padx=20, pady=(8, 0))
         self.env_text = tk.StringVar()
-        ttk.Label(env, textvariable=self.env_text, foreground="#555").pack(anchor="w")
+        ttk.Label(env, textvariable=self.env_text,
+                  style='Muted.TLabel').pack(anchor='w')
 
-        opt = ttk.Frame(self.root)
-        opt.pack(fill="x", **pad)
+        opt_card = self._make_card(self.root)
+        opt_card.pack(fill='x', padx=20, pady=8)
+        opt_inner = tk.Frame(opt_card, bg=UI_CARD)
+        opt_inner.pack(fill='x', padx=16, pady=12)
+        ttk.Label(opt_inner, text='选项',
+                  style='Section.TLabel').pack(anchor='w', pady=(0, 8))
+
         self.simple_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            opt, text="简洁模式(不分轨、经典流程，更快更稳定)",
-            variable=self.simple_var,
-        ).pack(anchor="w")
+            opt_inner, text='简洁模式(不分轨、经典流程，更快更稳定)',
+            variable=self.simple_var, style='Card.TCheckbutton').pack(anchor='w', pady=2)
+
         self.sep_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            opt, text="人声/伴奏分离分析(更准更干净，约多花几分钟；分离出的人声/鼓/贝斯/伴奏轨会一并保存)",
-            variable=self.sep_var,
-        ).pack(anchor="w")
+            opt_inner,
+            text='人声/伴奏分离分析(更准更干净，约多花几分钟；'
+                 '分离出的人声/鼓/贝斯/伴奏轨会一并保存)',
+            variable=self.sep_var, style='Card.TCheckbutton').pack(anchor='w', pady=2)
+
         self.mt3_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            opt, text="AI 智能识别增强(重点识别和弦，比 MT3 快约 6 倍；人声/贝斯用快速引擎)",
-            variable=self.mt3_var,
-        ).pack(anchor="w")
+            opt_inner,
+            text='AI 智能识别增强(重点识别和弦，比 MT3 快约 6 倍；'
+                 '人声/贝斯用快速引擎)',
+            variable=self.mt3_var, style='Card.TCheckbutton').pack(anchor='w', pady=2)
 
-        mid = ttk.Frame(self.root)
-        mid.pack(fill="x", **pad)
-        self.status = tk.StringVar(value="就绪。")
-        ttk.Label(mid, textvariable=self.status, wraplength=600, justify="left").pack(anchor="w", fill="x")
-        self.bar = ttk.Progressbar(mid, mode="indeterminate", length=600)
-        self.bar.pack(fill="x", pady=(6, 0))
+        mid = ttk.Frame(self.root, style='TFrame')
+        mid.pack(fill='x', padx=20, pady=(8, 0))
+        self.status = tk.StringVar(value='就绪。')
+        ttk.Label(mid, textvariable=self.status, style='Muted.TLabel',
+                  wraplength=700, justify='left').pack(anchor='w', fill='x')
+        self.bar = ttk.Progressbar(mid, mode='indeterminate', length=700)
+        self.bar.pack(fill='x', pady=(8, 0))
 
-        bot = ttk.Frame(self.root)
-        bot.pack(fill="x", side="bottom", **pad)
-        self.start_btn = ttk.Button(bot, text="开始转谱", command=self._start)
-        self.start_btn.pack(side="left")
-        self.open_btn = ttk.Button(bot, text="打开输出目录", command=self._open_outdir, state="disabled")
-        self.open_btn.pack(side="left", padx=8)
+        bot = tk.Frame(self.root, bg=UI_BG)
+        bot.pack(fill='x', side='bottom', padx=20, pady=(12, 16))
+        self.start_btn = ttk.Button(bot, text='开始转谱', style='Accent.TButton',
+                                    command=self._start)
+        self.start_btn.pack(side='left')
+        self.open_btn = ttk.Button(bot, text='打开输出目录', style='Secondary.TButton',
+                                   command=self._open_outdir, state='disabled')
+        self.open_btn.pack(side='left', padx=10)
 
+        try:
+            ico = os.path.join(bundle_dir(), 'assets', 'app_icon.ico')
+            if os.path.isfile(ico):
+                self.root.iconbitmap(ico)
+        except Exception:
+            pass
     def _refresh_env_status(self):
         lines = []
         if self.model_path:
-            lines.append("AI 识别模型：已就绪")
+            lines.append('AI 识别模型：已就绪')
         else:
-            lines.append("AI 识别模型：未找到(打包异常)")
+            lines.append('AI 识别模型：未找到(打包异常)')
         if self.ms_exe:
-            lines.append("MuseScore：已找到")
+            lines.append('MuseScore：已找到')
         else:
-            lines.append("MuseScore：未找到，请安装 MuseScore 4")
+            lines.append('MuseScore：未找到，请安装 MuseScore 4')
         if self.ffmpeg:
-            lines.append("ffmpeg：已找到(支持 MP3/M4A 等)")
+            lines.append('ffmpeg：已找到(支持 MP3/M4A 等)')
         else:
-            lines.append("ffmpeg：未找到(仅支持 WAV/FLAC/OGG)")
+            lines.append('ffmpeg：未找到(仅支持 WAV/FLAC/OGG)')
         if find_btd_checkpoint():
-            lines.append("和弦增强(ByteDance)：可用")
+            lines.append('和弦增强(ByteDance)：可用')
         else:
-            lines.append("和弦增强(ByteDance)：未找到(和弦轨退回快速引擎)")
-        self.env_text.set("　|　".join(lines))
-
-    # ---- 事件 ----
+            lines.append('和弦增强(ByteDance)：未找到(和弦轨退回快速引擎)')
+        self.env_text.set('　|　'.join(lines))
     def _browse_audio(self):
         p = filedialog.askopenfilename(
             title="选择音频文件",
@@ -2512,9 +3241,10 @@ class App:
 
     def _set_running(self, running):
         self.running = running
-        self.start_btn.config(state="disabled" if running else "normal")
-        self.audio_entry.config(state="disabled" if running else "normal")
-        self.outdir_entry.config(state="disabled" if running else "normal")
+        self.start_btn.config(state='disabled' if running else 'normal')
+        self.audio_entry.config(state='disabled' if running else 'normal')
+        self.outdir_entry.config(state='disabled' if running else 'normal')
+        self.bvid_entry.config(state='disabled' if running else 'normal')
         if running:
             self.bar.start(12)
         else:
@@ -2523,89 +3253,98 @@ class App:
     def _start(self):
         audio = self.audio_var.get().strip()
         outdir = self.outdir_var.get().strip()
-        if not audio:
-            messagebox.showwarning("提示", "请先选择音频文件。")
+        bvid = self.bvid_var.get().strip()
+        if not audio and not bvid:
+            messagebox.showwarning('提示', '请选择音频文件，或输入 B站 BV 号。')
             return
-        if not os.path.isfile(audio):
-            messagebox.showwarning("提示", "音频文件不存在。")
+        if audio and not os.path.isfile(audio):
+            messagebox.showwarning('提示', '音频文件不存在。')
             return
         if not outdir:
-            outdir = os.path.dirname(audio)
-            self.outdir_var.set(outdir)
+            if audio:
+                outdir = os.path.dirname(audio)
+                self.outdir_var.set(outdir)
+            else:
+                outdir = filedialog.askdirectory(title='选择输出目录(B站音频与转谱产物将保存到此)')
+                if not outdir:
+                    return
+                self.outdir_var.set(outdir)
         if not os.path.isdir(outdir):
-            messagebox.showwarning("提示", "输出目录不存在。")
+            messagebox.showwarning('提示', '输出目录不存在。')
             return
-
         if not self.model_path:
-            messagebox.showerror("错误", "未找到 AI 识别模型。")
+            messagebox.showerror('错误', '未找到 AI 识别模型。')
             return
         if not self.ms_exe:
-            messagebox.showerror("错误", "未找到 MuseScore4.exe。请安装 MuseScore 4。")
+            messagebox.showerror('错误', '未找到 MuseScore4.exe。请安装 MuseScore 4。')
             return
-
-        self.open_btn.config(state="disabled")
+        self.open_btn.config(state='disabled')
         self._set_running(True)
-        self.status.set("准备中…")
-        self.q.put(("ready", None))
-        t = threading.Thread(target=self._worker, args=(audio, outdir), daemon=True)
+        self.status.set('准备中…')
+        self.q.put(('ready', None))
+        t = threading.Thread(target=self._worker, args=(audio, bvid, outdir), daemon=True)
         t.start()
 
-    def _worker(self, audio, outdir):
+    def _worker(self, audio, bvid, outdir):
         try:
-            progress = lambda msg: self.q.put(("status", msg))
-            self.q.put(("status", "开始处理…"))
-            results = run_pipeline(
-                audio, outdir, self.model_path, self.ms_exe, self.ffmpeg, progress,
-                use_separation=self.sep_var.get(),
-                simple_mode=self.simple_var.get(),
-                use_mt3=self.mt3_var.get(),
-            )
-            self.q.put(("done", results))
+            progress = lambda msg: self.q.put(('status', msg))
+            self.q.put(('status', '开始处理…'))
+            if not audio and bvid:
+                from bilibili import fetch_audio
+                progress('正在按 BV 号获取 B站音频…')
+                audio, _title, _dur = fetch_audio(
+                    bvid, save_path=os.path.join(outdir, f'{bvid}.m4a'),
+                    progress=lambda m: self.q.put(('status', m)))
+                self.q.put(('audio', audio))
+            results = run_pipeline(audio, outdir, self.model_path, self.ms_exe,
+                                   self.ffmpeg, progress,
+                                   use_separation=self.sep_var.get(),
+                                   simple_mode=self.simple_var.get(),
+                                   use_mt3=self.mt3_var.get())
+            self.q.put(('done', results))
         except Exception as e:
-            self.q.put(("error", str(e) + "\n" + traceback.format_exc(limit=3)))
+            self.q.put(('error', str(e) + '\n' + traceback.format_exc(limit=3)))
 
     def _poll(self):
         try:
             while True:
                 kind, payload = self.q.get_nowait()
-                if kind == "status":
+                if kind == 'status':
                     self.status.set(payload)
-                elif kind == "done":
+                    continue
+                if kind == 'audio':
+                    self.audio_var.set(payload)
+                    continue
+                if kind == 'done':
                     self._set_running(False)
                     r = payload
-                    self.status.set("✅ 完成！")
-                    self.open_btn.config(state="normal")
-                    pdfs = r.get("pdf") or []
+                    self.status.set('✅ 完成！')
+                    self.open_btn.config(state='normal')
+                    pdfs = r.get('pdf') or []
                     if isinstance(pdfs, str):
                         pdfs = [pdfs]
-                    pdf_lines = "\n".join(f"　五线谱：{p}" for p in pdfs)
-                    stem_lines = ""
-                    stems = r.get("stems")
+                    pdf_lines = '\n'.join(f'　五线谱：{p}' for p in pdfs)
+                    stem_lines = ''
+                    stems = r.get('stems')
                     if stems:
-                        names = {"vocals": "人声", "drums": "鼓", "bass": "贝斯", "other": "其他"}
-                        stem_lines = "　分离音轨：\n" + "\n".join(
-                            f"　　{names.get(k, k)}：{v}" for k, v in stems.items()
-                        ) + "\n"
-                    messagebox.showinfo(
-                        "完成",
-                        "已生成：\n"
-                        f"{pdf_lines}\n"
-                        f"　钢琴演奏：{r['wav']}\n"
-                        f"　MIDI：{r['midi']}\n"
-                        f"{stem_lines}",
-                    )
-                elif kind == "error":
+                        names = {'vocals': '人声', 'drums': '鼓', 'bass': '贝斯', 'other': '其他'}
+                        stem_lines = ('　分离音轨：\n'
+                                      + '\n'.join(f'　　{names.get(k, k)}：{v}'
+                                                  for k, v in stems.items()) + '\n')
+                    messagebox.showinfo('完成',
+                        f'已生成：\n{pdf_lines}\n　钢琴演奏：{r["wav"]}'
+                        f'\n　MIDI：{r["midi"]}\n{stem_lines}')
+                    continue
+                if kind == 'error':
                     self._set_running(False)
-                    self.status.set("❌ 处理失败。")
-                    messagebox.showerror("出错", payload)
-                elif kind == "ready":
+                    self.status.set('❌ 处理失败。')
+                    messagebox.showerror('出错', payload)
+                    continue
+                if kind == 'ready':
                     pass
         except queue.Empty:
             pass
         self.root.after(120, self._poll)
-
-
-
 
 def cli_main():
     """隐藏的命令行模式，便于自动化/打包自检。
@@ -2613,21 +3352,18 @@ def cli_main():
     用法：transcriber_app --audio <音频> --outdir <输出目录>
     无图形界面，直接跑完整管线，完成后打印产物路径(JSON)并退出。
     """
-    # noconsole 打包且未附加任何控制台时，sys.stdout/stderr 可能为 None，
-    # 或在沙箱/无控制台环境下是写入即抛 OSError 的坏句柄。
-    # 先探测：坏句柄整体替换为 devnull，让库内部的打印(basic_pitch 等)也不崩；
-    # 本函数自己的输出再走 _safe_write 双保险。
     def _stream_ok(stream):
         try:
-            stream.write("")
+            stream.write('')
             return True
         except Exception:
             return False
 
+    # 打包成 --windowed exe 时 stdout/stderr 可能是 None，写会炸 → 换成 devnull
     if sys.stdout is None or not _stream_ok(sys.stdout):
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
     if sys.stderr is None or not _stream_ok(sys.stderr):
-        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        sys.stderr = open(os.devnull, 'w', encoding='utf-8')
 
     def _safe_write(stream, text):
         try:
@@ -2637,43 +3373,47 @@ def cli_main():
             pass
 
     def progress(msg):
-        _safe_write(sys.stderr, "[cli] " + msg + "\n")
+        _safe_write(sys.stderr, '[cli] ' + msg + '\n')
 
     ap = argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--audio", required=True)
-    ap.add_argument("--outdir", required=True)
-    ap.add_argument("--no-sep", action="store_true",
-                    help="跳过人声/伴奏分离，直接用整体分析")
-    ap.add_argument("--simple", action="store_true",
-                    help="简洁模式：不分轨，按音高切左右手(经典流程)")
-    ap.add_argument("--mt3", action="store_true",
-                    help="AI 智能识别增强：用 MT3 多声部模型识别全曲和弦(更丰富，CPU 较慢)")
-    ap.add_argument("--help", action="store_true")
-    # 剥掉 main() 已消耗的 "--cli"，避免 argparse 报未知参数
-    argv = [a for a in sys.argv[1:] if a != "--cli"]
+    ap.add_argument('--audio')
+    ap.add_argument('--bvid', help='B站视频 BV 号：自动下载音频后转谱(无需 Cookie)')
+    ap.add_argument('--outdir', required=True)
+    ap.add_argument('--no-sep', action='store_true',
+                    help='跳过人声/伴奏分离，直接用整体分析')
+    ap.add_argument('--simple', action='store_true',
+                    help='简洁模式：不分轨，按音高切左右手(经典流程)')
+    ap.add_argument('--mt3', action='store_true',
+                    help='AI 智能识别增强：用 MT3 多声部模型识别全曲和弦(更丰富，CPU 较慢)')
+    ap.add_argument('--help', action='store_true')
+    argv = [a for a in sys.argv[1:] if a != '--cli']
     args = ap.parse_args(argv)
-
     try:
-        results = run_pipeline(
-            args.audio, args.outdir,
-            find_model(), find_musescore(), find_ffmpeg(),
-            progress,
-            use_separation=not args.no_sep,
-            simple_mode=args.simple,
-            use_mt3=args.mt3,
-        )
+        audio = args.audio
+        if not audio and args.bvid:
+            from bilibili import fetch_audio
+            _safe_write(sys.stderr, '[cli] 正在按 BV 号获取 B站音频…\n')
+            audio, _title, _dur = fetch_audio(
+                args.bvid,
+                save_path=os.path.join(args.outdir, f'{args.bvid}.m4a'),
+                progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}\n'))
+        if not audio:
+            _safe_write(sys.stderr, 'ERROR: 需提供 --audio 或 --bvid\n')
+            sys.exit(2)
+        results = run_pipeline(audio, args.outdir, find_model(), find_musescore(),
+                               find_ffmpeg(), progress,
+                               use_separation=not args.no_sep,
+                               simple_mode=args.simple, use_mt3=args.mt3)
     except Exception as e:
-        _safe_write(sys.stderr, "ERROR: " + str(e) + "\n")
-        if getattr(sys, "frozen", False):
+        _safe_write(sys.stderr, 'ERROR: ' + str(e) + '\n')
+        if getattr(sys, 'frozen', False):
             try:
                 traceback.print_exc(file=sys.stderr)
             except Exception:
                 pass
         sys.exit(1)
-
-    _safe_write(sys.stdout, json.dumps(results, ensure_ascii=False) + "\n")
+    _safe_write(sys.stdout, json.dumps(results, ensure_ascii=False) + '\n')
     sys.exit(0)
-
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":
