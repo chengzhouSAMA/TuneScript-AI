@@ -33,29 +33,32 @@ PRESETS = {
     "default": {},
 
     # ---- 中文（含合成人声：洛天依/星尘/诗岸等）----
-    # 现状：LID 在 5 首固定素材上把中文全部判对（fanwut/gouzhi/jiabin 均 zh，见
-    "zh": {},
+    "zh": {"phonetic": "none"},
 
     # ---- 粤语 ----
-    # 因此 yue 预设与 zh 同值；保留该键是为了将来换更强的 LID 后端（Qwen3-ASR 等）后能直接生效。
-    "yue": {},
+    # 与 zh 同值；保留该键是为了将来换更强的 LID 后端后能直接生效。
+    "yue": {"phonetic": "none"},
 
     # ---- 日语 ----
-    #   「日语等多音节语言一字一音、同音反复极多，绝不能合并成一条长音」。
-    # 现状 default 的 fill_gap=0.12 已经低于真人快音节的 ~0.25s 间隔，故**不再下调**；
-    # 这里只把 fill_win 从 0.06 收紧到 0.05：
-    #   属"方向合理但未达显著"。**未验收**，故仅在 TS_LANG_MODE=auto 时生效。
+    # 日语一字一音、同音反复极多，所以对齐单位是**摩拉**；
+    # 现有 default 的 fill_gap=0.12 已低于真人快音节的 ~0.25s 间隔，故不再下调，
+    # 只把 fill_win 从 0.06 收紧到 0.05。**未验收**，仅在 TS_LANG_MODE=auto 时生效。
     "ja": {
         "fill_win": 0.05,
-        "evidence": "方向合理但未达显著（附-14.5，+0.0036 < ±0.01）；待全量 A/B 验收",
+        "phonetic": "mora",
+        "evidence": "方向合理但未达显著（+0.0036 < ±0.01 噪声地板）；待全量 A/B 验收",
     },
 
     # ---- 英语 ----
-    # 英语音节更长、辅音簇多，碎音合并可以更激进一点（fill_gap 0.12→0.16）。
-    # 因此**默认不启用**该预设（见 DISABLED_BY_DEFAULT）。
+    # 英语是重音计时，一个音节可跨多个音素，所以对齐单位是**元音核（音节）**，
+    # 不是音素。音节更长、辅音簇更多，同音高碎音合并可以比日语激进
+    # （fill_gap 0.12→0.16）。
+    # 仍属**未验收假设**：只在 30 秒英文试听段上验证过音素/音节路径本身可用，
+    # 没有做过整曲 A/B，所以默认不启用（见 DISABLED_BY_DEFAULT）。
     "en": {
         "fill_gap": 0.16,
-        "evidence": "假设·未验收（项目无英语测试曲，无任何实测依据）",
+        "phonetic": "syllable",
+        "evidence": "假设·未验收（仅在 30s 英文试听段验证过音节路径，无整曲 A/B）",
     },
 }
 
@@ -70,6 +73,15 @@ CODE_NAMES = {"zh": "中文(普通话)", "yue": "粤语", "ja": "日语", "en": 
 
 def mode_names():
     return sorted(PRESETS.keys())
+
+
+def phonetic_unit(code):
+    """该语种的**音节对齐单位**：'mora'（日语摩拉）/ 'syllable'（英语元音核）/ 'none'。
+
+    供 `asr_refine.phonetic_timeline()` 之类的调用方决定按哪种单位切分。
+    """
+    p = PRESETS.get((code or "").strip().lower()) or {}
+    return p.get("phonetic", "none")
 
 
 def enabled():

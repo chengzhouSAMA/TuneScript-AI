@@ -163,6 +163,42 @@ def main():
     finally:
         os.environ.pop("TS_QWEN_MODEL", None)
 
+    print("=== [10] 英语音素/音节路径 ===")
+    import en_phoneme as ep
+    import asr_refine as ar
+    check("cmudict 词典已加载", bool(ep._dict()), "%d 词条" % len(ep._dict()))
+    r = ep.analyze("Hello, it's me")
+    check("Hello, it's me → 4 音节", r["n_syllables"] == 4, r["ipa"])
+    check("音标含 hə", "hə" in r["ipa"], r["ipa"][:40])
+    # 音节边界：somebody 应切 sˈʌm·bˌɑ·di（不能把 mb 当音节首）
+    s = ep.analyze("somebody")["syllables"]
+    check("somebody → 3 音节", len(s) == 3,
+          "·".join(x["ipa"] for x in s))
+    check("somebody 首音节尾含 M（mb 不算合法音节首）",
+          "M" in s[0].get("coda", []), str(s[0].get("coda")))
+    s2 = ep.analyze("wondering")["syllables"]
+    check("wondering → 3 音节且首音节尾为 N", len(s2) == 3 and "N" in (s2[0].get("coda") or []),
+          "·".join(x["ipa"] for x in s2))
+    check("fire → 2 音节（元音核计数）", ep.analyze("fire")["n_syllables"] == 2,
+          ep.analyze("fire")["ipa"])
+    check("OOV 词走拼读兜底且被记录", True if ep.analyze("zzqx")["oov"] else False,
+          str(ep.analyze("zzqx")["oov"]))
+    # 语种分派
+    check("detect_lang: 假名 → ja", ar.detect_lang("さよなら") == "ja")
+    check("detect_lang: 拉丁 → en", ar.detect_lang("Hello world") == "en")
+    tl = ar.phonetic_timeline("Somebody that I used to know", t0=0.0, t1=8.0)
+    check("英语 phonetic_timeline 给出 8 个音节", tl["n_units"] == 8, str(tl["n_units"]))
+    check("英语单位带 IPA", bool(tl["units"] and tl["units"][0].get("ipa")),
+          tl["units"][0].get("ipa", "") if tl["units"] else "")
+    tlj = ar.phonetic_timeline("さよなら", t0=0.0, t1=2.0)
+    check("日语仍走摩拉（4 个）", tlj["n_units"] == 4, tlj["label"])
+    g = ar.syllable_grid([{"t0": 0.0, "t1": 4.0, "text": "Somebody"},
+                          {"t0": 4.0, "t1": 6.0, "text": "さよなら"}])
+    check("混排音节轴按内容分派", len(g) == 3 + 4 and g[0]["lang"] == "en" and g[-1]["lang"] == "ja",
+          "%d 单位，lang=%s..%s" % (len(g), g[0]["lang"], g[-1]["lang"]))
+    check("lang_modes 报告英语单位为 syllable",
+          __import__("lang_modes").phonetic_unit("en") == "syllable")
+
     print("=== [5] audio_crop 裁剪时长 ===")
     import audio_crop as ac
     src = os.path.join(stems, "shiki", os.listdir(os.path.join(stems, "shiki"))[0])

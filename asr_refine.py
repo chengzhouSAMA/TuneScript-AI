@@ -8,6 +8,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 import ja_romaji as JR                                        # noqa: E402
+import en_phoneme as EP                                       # noqa: E402
 
 ENV_RETRY = "TS_ASR_RETRY"            # "1" 启用重试（默认 0）
 ENV_RETRY_MIN = "TS_ASR_RETRY_MIN"    # 子窗最小秒数（默认 2.0）
@@ -114,6 +115,122 @@ def retry_windows(spans, call_asr, expect_lang="ja", min_len=2.0, threshold=0.75
 
 
 _LANG_NAME = {"ja": "Japanese", "zh": "Chinese", "yue": "Cantonese", "en": "English"}
+
+
+def detect_lang(text):
+    """按字符集粗判语种：含假名 → ja，含拉丁字母 → en，否则 unknown。
+
+    用途：ASR 输出里日英不会混，但调用方未必知道当前段是什么语言，
+    这里给 `phonetic_timeline` 一个默认分派依据。
+    """
+    t = text or ""
+    kana = sum(1 for c in t if JR.is_kana(c))
+    latin = sum(1 for c in t if c.isascii() and c.isalpha())
+    if kana and kana >= latin:
+        return "ja"
+    if latin:
+        return "en"
+    return "unknown"
+
+
+def phonetic_timeline(text, lang=None, t0=None, t1=None, char_times=None):
+    """按语种给出**音节轴**（"谐音音节"的统一入口）。
+
+    日语 → 罗马音摩拉（`ja_romaji`）；英语 → IPA 音节（`en_phoneme`）。
+    英语不用摩拉是因为它是重音计时语言，一个音节可跨多个音素，
+    对应的单位是**元音核**。
+
+    返回 {"lang","n_units","units":[{...,"t0","t1"}],"label","timing"}
+      · `label` 是整串的展示形式（罗马音 / IPA）
+      · `units` 每项含 `unit`(摩拉罗马音或音节 ARPAbet)、`ipa`、`t0`、`t1`
+    """
+    lang = (lang or detect_lang(text) or "unknown").lower()
+    out = {"text": text, "lang": lang, "n_units": 0, "units": [],
+           "label": "", "timing": "char_align" if char_times else "uniform",
+           "oov": []}
+    if lang == "ja":
+        r = romaji_timeline(text, t0=t0, t1=t1, char_times=char_times)
+        out["n_units"] = r["n_morae"]
+        out["label"] = r["romaji"]
+        out["kana"] = r["kana"]
+        out["units"] = [{"unit": m["romaji"], "ipa": "", "mora": m["mora"],
+                         "t0": m["t0"], "t1": m["t1"]} for m in r["morae"]]
+        return out
+    if lang == "en":
+        r = EP.analyze(text)
+        syls = r["syllables"]
+        if char_times:
+            units = EP.from_char_times(text, char_times, t0=0.0)
+        elif t0 is not None and t1 is not None:
+            units = EP.distribute(syls, float(t0), float(t1))
+        else:
+            units = EP.distribute(syls, 0.0, float(max(1, len(syls)) * 0.35))
+        out["n_units"] = len(units)
+        out["label"] = r["ipa"]
+        out["oov"] = r["oov"]
+        out["units"] = [{"unit": u["syllable"], "ipa": u["ipa"], "word": u.get("word", ""),
+                         "stress": u.get("stress", 0), "t0": u["t0"], "t1": u["t1"]}
+                        for u in units]
+        return out
+    return out
+
+
+def syllable_grid(rows, lang=None):
+    """把多行识别结果拼成**全局音节轴**（日语摩拉 / 英语 IPA 音节统一结构）。
+
+    返回 [{"t0","t1","unit","ipa","lang","index","src_t0","src_t1","text"}, ...]
+    每个窗的时长在其音节间均分（有强制对齐时可换成真实时间戳）。
+    """
+    out, k = [], 0
+    for r in sorted(rows, key=lambda x: x["t0"]):
+        t = (r.get("text") or "").strip()
+        if not t:
+            continue
+        tl = phonetic_timeline(t, lang=lang, t0=r["t0"], t1=r["t1"])
+        for u in tl["units"]:
+            u = dict(u)
+            u["index"] = k
+            u["lang"] = tl["lang"]
+            u["src_t0"] = r["t0"]
+            u["src_t1"] = r["t1"]
+            u["text"] = t
+            out.append(u)
+            k += 1
+    return out
+
+
+def notes_vs_units(notes, units, tol=0.12):
+    """量化「唱出来的音节有没有变成音符」。
+
+    对英日语通用（单位是摩拉还是音节由 `syllable_grid` 决定）。
+
+    返回 {"n_units","n_hit","hit_rate","missing":[...]}
+    判据：某音节起点附近 tol 秒内存在一个音符起音 → 记命中。
+    """
+    starts = sorted(float(n[0]) for n in (notes or []))
+    hit, miss = 0, []
+    for u in units:
+        t = float(u["t0"])
+        if any(abs(s - t) <= tol for s in starts):
+            hit += 1
+        else:
+            miss.append(u)
+    n = len(units)
+    return {"n_units": n, "n_hit": hit, "missing": miss,
+            "hit_rate": round(hit / float(n), 4) if n else 0.0}
+
+
+def merge_phonetic(rows, lang=None, join=" "):
+    """把多行重试结果拼成一条展示串（日语罗马音 / 英语 IPA）。"""
+    parts = []
+    for r in sorted(rows, key=lambda x: x["t0"]):
+        t = (r.get("text") or "").strip()
+        if not t:
+            continue
+        tl = phonetic_timeline(t, lang=lang)
+        if tl["label"]:
+            parts.append(tl["label"])
+    return join.join(parts)
 
 
 def romaji_timeline(text, t0=None, t1=None, char_times=None, sep_lines=False):

@@ -27,12 +27,15 @@ _pk_mods = collect_submodules('pykakasi')
 # ---- 本次新增的模块（多数是函数内 import / try-import，静态分析可能漏掉） ----
 _new_mods = [
     'lang_id', 'audio_crop', 'lang_modes', 'lang_pipeline',
-    'ja_romaji', 'asr_refine', 'lyrics_fetch', 'lyrics_match',
+    'ja_romaji', 'en_phoneme', 'asr_refine', 'lyrics_fetch', 'lyrics_match',
     'netease', 'bilibili',
     'onnxruntime', 'onnxruntime.capi', 'onnxruntime.capi._pybind_state',
     'onnxruntime.capi.onnxruntime_inference_collection',
     'jaconv', 'deprecated', 'wrapt',
 ]
+
+# cmudict 自带 CMU 发音词典数据（约 3.5 MB），不带上的话英语音素只能走拼读兜底
+_cmu_data = collect_data_files('cmudict')
 
 a = Analysis(
     [os.path.join(BASE, 'transcriber_app.py')],
@@ -54,7 +57,7 @@ a = Analysis(
         (os.path.join(BASE, 'lang_id_models', 'lang_dict_95.json'), 'lang_id_models'),
         (os.path.join(BASE, 'lang_id_models', 'lang_group_dict_95.json'), 'lang_id_models'),
         (os.path.join(BASE, 'lang_id_qwen_runner.py'), '.'),
-    ] + _pk_data,
+    ] + _pk_data + _cmu_data,
     hiddenimports=[
         'bilibili', 'requests',
         'demucs.pretrained', 'demucs.apply', 'demucs.htdemucs',
