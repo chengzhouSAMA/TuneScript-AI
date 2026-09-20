@@ -1,4 +1,8 @@
-﻿basic-pitch>=0.4.0
+# TuneScript AI — 依赖
+# 环境：Windows 10/11 + Python 3.9
+
+# ---- 核心：转谱管线 ----
+basic-pitch>=0.4.0
 demucs>=4.0.1
 torch>=2.0.0
 torchaudio
@@ -10,4 +14,27 @@ soundfile
 numpy
 scipy
 pycryptodome
+
+# ---- 和弦识别（ByteDance 钢琴转录）----
 piano-transcription-inference>=0.0.6
+
+# ---- V0.5.1 新增 ----
+requests>=2.28          # B 站下载 / 联网取歌词
+pykakasi>=2.2           # 日语：汉字 → 假名 → 罗马音（含约 9.8 MB 字典数据）
+
+# ---- 可选：Qwen3-ASR 语种识别 / 歌词 / 强制对齐 ----
+# ⚠️ 必须装在**独立的 Python ≥3.10 环境**里，不能装进主环境：
+#    qwen-asr 的源码用了 PEP 604（`X | Y`），Python 3.9 运行时会报 TypeError；
+#    它的依赖 accelerate>=1.10 也要求 Python ≥3.10。
+#    主程序通过 subprocess 调用该环境，所以两者互不干扰。
+#
+#    python -m venv lang_id_venv314
+#    lang_id_venv314\Scripts\python -m pip install torch "transformers==4.57.6" accelerate
+#    lang_id_venv314\Scripts\python -m pip install qwen-asr --no-deps   # 绕开它 pinned 的 accelerate
+#
+#    模型权重（约 3.5 GB）放到 lang_id_models/：
+#      Qwen/Qwen3-ASR-0.6B 与 Qwen/Qwen3-ForcedAligner-0.6B
+#
+#    不装则 TS_LANG_BACKEND=auto 会自动退回内置的 Silero lang95（无需任何额外依赖）。
+#
+# qwen-asr
