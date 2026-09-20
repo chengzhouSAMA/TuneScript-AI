@@ -1,38 +1,12 @@
 # -*- coding: utf-8 -*-
 """audio_crop.py — 音频裁剪 / 人声分段 / 语言分段裁剪。
 
-三种模式
---------
-1. `crop`   —— 纯时间裁剪：把 [start, end) 切出来另存（最基础的裁剪）。
-2. `energy` —— 按人声能量（RMS 门 + 最短静音间隔）切成若干「有声音段」。
-3. `lang`   —— **语言分段裁剪**：滑窗 LID → 平滑 → 把同一段人声按语种切开，
-               每个语种分片单独写 WAV，并产出 `manifest.json`。
-
-为什么需要 `lang` 模式
-----------------------
-主人的需求原话：「将不同语言的同一段人声音频裁剪开进行不同语言模式识别」。
-一首歌里可能中文段落 + 日语段落交替（或中英混唱）。整曲只用一个语种预设会两边都不讨好；
-正确做法是**按语种切段 → 每段用各自的语种预设识别 → 再按全局时间轴拼回去**。
-
-胶水函数（本模块提供，让"拼回去"不会出错）
-------------------------------------------
-- `manifest_notes(segments, notes_by_index)`：把各分片**段内局部时间**的音符
-  加回该分片的 `t0` 偏移，得到**全局时间轴**音符；按 time 排序后可直接进 `fuse_to_piano`。
-- 分片之间不做任何合并/去抖——**跨段处理必须留给下游**（否则会重复施加同一套后处理）。
-
-纪律
-----
-- 只读源文件；输出一律写到 `--outdir`，**绝不污染源素材目录**
-  （这是项目里 `_merge_accomp_stems` 踩过的坑，见 附-14.7）。
-- 输出文件名带语种与时间码，便于人工核对；`manifest.json` 是下游的唯一契约。
-- 任何异常都退化为「整段当作一个分片」，不中断管线。
-
 CLI 例
-------
-    python audio_crop.py --mode crop   --audio in.wav --outdir out --start 30 --end 45
-    python audio_crop.py --mode energy --audio in.wav --outdir out --min-gap 1.0
-    python audio_crop.py --mode lang   --audio vocals.wav --outdir out --win 10 --hop 5
-    python audio_crop.py --mode lang   --audio vocals.wav --outdir out --dry-run
+-
+python audio_crop.py --mode crop   --audio in.wav --outdir out --start 30 --end 45
+python audio_crop.py --mode energy --audio in.wav --outdir out --min-gap 1.0
+python audio_crop.py --mode lang   --audio vocals.wav --outdir out --win 10 --hop 5
+python audio_crop.py --mode lang   --audio vocals.wav --outdir out --dry-run
 """
 import json
 import os
@@ -111,12 +85,7 @@ def fmt_tc(t):
 # --------------------------------------------------------------------------
 def segment_by_energy(wav_path, min_gap=1.0, frame=0.05, rel_db=-35.0, min_seg=0.5,
                       pad=0.10, sr=None):
-    """按 RMS 能量把「有声段」切出来。
-
-    判据：帧 RMS > (全局有声峰值 dB − |rel_db|) 视为有声；有声帧之间间隔 > min_gap
-    视为分段边界；每段前后各留 pad 秒。**不做机器学习，纯信号处理**，用作
-    在没有 LID（或 LID 不可用）时的降级方案，也用于把长静音挡在 LID 之外。
-    """
+    """按 RMS 能量把「有声段」切出来。"""
     data, file_sr = read_wav(wav_path)
     if data.ndim == 2:
         data = data.mean(axis=1)
@@ -163,13 +132,7 @@ def segment_by_energy(wav_path, min_gap=1.0, frame=0.05, rel_db=-35.0, min_seg=0
 # 模式 3：按语种分段（核心）
 # --------------------------------------------------------------------------
 def _loud_weights(wins, floor=0.05):
-    """把每个窗的 dBFS 映射成**投票权重**（越响权重越高）。
-
-    动机（主人要求）：「相同时间点的语言挑选音量大的部分优先识别」——
-    唱得响的段落，LID 的判断本身更可信（信噪比高、分离残留少），所以它应该在
-    语种表决中占更大权重。用**相对最响窗**的线性幅度比，并夹到 [floor, 1]，
-    避免静音窗被压成 0 或极端值把其它窗按死。
-    """
+    """把每个窗的 dBFS 映射成**投票权重**（越响权重越高）。"""
     dbs = [float(w.get("db", -120.0)) for w in wins]
     ref = max(dbs) if dbs else -120.0
     out = []
@@ -192,16 +155,7 @@ def _seg_db(data, sr, t0, t1):
 
 
 def resolve_overlaps_by_loudness(segments, wav_path=None, data=None, sr=None):
-    """★ 重叠解析：把可能**在时间上重叠**的分片，整理成互不重叠的划分。
-
-    规则（主人要求）：同一时间点被多个分片覆盖时，**谁的音频更响就用谁**。
-
-    做法：把所有分片端点切成小区间；每个小区间取覆盖它的所有分片，
-    比较它们**在该小区间内**的 RMS，取最响的那个作为该区间的归属语种；
-    相邻同语种区间再合并。全程不改变时间轴总跨度。
-
-    返回新的 segments 列表；若没有重叠则原样返回（不引入额外改动）。
-    """
+    """重叠解析：把可能**在时间上重叠**的分片，整理成互不重叠的划分。"""
     if not segments:
         return segments
     # 没有重叠 -> 直接返回，保证"无重叠时零行为变化"
@@ -249,19 +203,7 @@ def resolve_overlaps_by_loudness(segments, wav_path=None, data=None, sr=None):
 
 
 def _time_vote_units(wins, voiced, loud_weights, topk=3):
-    """★ 逐时间点的「音量优先」语种表决（主人要求）。
-
-    事实：窗长 win、窗移 hop 时，**每个时间点被 win/hop 个重叠窗覆盖**
-    （如 win=10/hop=5 → 每点被 2 个窗覆盖；win=10/hop=2.5 → 4 个）。
-    所以"同一时间点的语言"本来就存在多个候选，可以直接在这里表决：
-
-    对每个时间点格，把覆盖它的所有窗的候选语种按 **窗口概率 × 该窗响度权重** 累加，
-    取累加值最大的语种 —— 于是**唱得响的那一段所在的窗，在它覆盖的时间点上话语权更大**，
-    正好落实「相同时间点挑选音量大的部分优先识别」。
-
-    返回与 wins 同构的 unit 列表（t0/t1 为时间点格；code/prob/ok/db 为该格的表决结果）。
-    注意：此路径下 `prob` = **该语种在本格表决中的票权占比**（与"单窗 softmax 概率"语义不同）。
-    """
+    """逐时间点的「音量优先」语种表决。"""
     edges = sorted({round(w["t0"], 6) for w in wins} | {round(w["t1"], 6) for w in wins})
     units = []
     for a, b in zip(edges, edges[1:]):
@@ -295,25 +237,14 @@ def _time_vote_units(wins, voiced, loud_weights, topk=3):
 
 def _fill_and_smooth(labels, voiced=None, kernel=3):
 
-    """补齐「有声但判不准」的窗，并做多数投票平滑。
-
-    ★ 关键纪律（2026-09-20 踩坑后加）：
-      **静音窗绝不继承语种。**
-      实测：`勾指起誓` 的人声轨前 15 s 是 −84 dBFS 的数字静音，而初版实现
-      把静音窗"前向填充"成了上一个语种（ja），结果整段中文被吞并成日语 ——
-      "中·日·中"三段只检出 1 个交界。因此：
-        · 只对 `voiced=True` 且判不准的窗做最近邻填充；
-        · 静音窗一律保持 None（= 无人声、无语言），由调用方走默认预设。
-    """
+    """补齐「有声但判不准」的窗，并做多数投票平滑。"""
     n = len(labels)
     if voiced is None:
         voiced = [True] * n
     out = list(labels)
 
     # 1) 只填「有声但无标签」的窗：取**距离最近**的有标签窗（而非只看左边）。
-    #    为什么（2026-09-20 实测）：初版只做前向填充，跨语言边界的那个"骑墙窗"
     #    一旦置信度不足，就会继承**前一个**语种 → 交界被系统性推后。
-    #    合成混唱实测偏晚 2.5~6 s（win=10）；改用最近邻后偏差显著缩小。
     conf = [i for i in range(n) if out[i] is not None]
     if conf:
         for i in range(n):
@@ -343,16 +274,14 @@ def segment_by_language(wav_path, det=None, win=10.0, hop=5.0, min_seg=8.0,
     """把一段人声按语种切成若干分片。
 
     返回 (segments, meta)：
-      segments = [{"index","t0","t1","lang","prob","n_windows","votes"}, ...]
-      meta     = {"detector_available", "reason", "duration", "win", "hop", "labels", "voiced"}
+    segments = [{"index","t0","t1","lang","prob","n_windows","votes"}, ...]
+    meta     = {"detector_available", "reason", "duration", "win", "hop", "labels", "voiced"}
     纪律：
-      · **静音段（< silence_db）单独成段且 lang=None**，绝不继承相邻语种
-        （2026-09-20 踩坑：`勾指起誓` 人声轨前 15 s 是 −84 dBFS 数字静音，
-         初版把它前向填充成 ja，导致"中·日·中"只检出 1 个交界）；
-      · 语种判不准但**有声**的窗，由最近的有声邻居补齐；
-      · **相同时间点按音量优先**（`loudness_priority=True`，默认）：每个时间点被
-        win/hop 个重叠窗覆盖，逐点按「窗口概率 × 该窗响度权重」表决，唱得响的窗话语权更大；
-      · 全曲 LID 不可用时返回单个覆盖全曲的 `lang=None` 分片（等价于"不分段"）。
+    **静音段（< silence_db）单独成段且 lang=None**，绝不继承相邻语种
+    语种判不准但**有声**的窗，由最近的有声邻居补齐；
+    **相同时间点按音量优先**（`loudness_priority=True`，默认）：每个时间点被
+    win/hop 个重叠窗覆盖，逐点按「窗口概率 × 该窗响度权重」表决，唱得响的窗话语权更大；
+    全曲 LID 不可用时返回单个覆盖全曲的 `lang=None` 分片（等价于"不分段"）。
     """
     data, sr = read_wav(wav_path)
     if data.ndim == 2:
@@ -463,7 +392,6 @@ def segment_by_language(wav_path, det=None, win=10.0, hop=5.0, min_seg=8.0,
             i += 1
 
     # 低置信段：并回邻居（防「假换语种」）。
-    # 实测：纯日语曲 `モニタリング` 上曾切出一个 10 s 的假 yue 段（prob=0.52、仅 2 窗）
     # ——假换语种比漏检更糟（会把整段塞进错误预设），故设一道可配闸门。
     def group_prob(g):
         pr = [units[i]["prob"] for i in g["idxs"] if units[i]["ok"]]
@@ -511,16 +439,13 @@ def segment_by_language(wav_path, det=None, win=10.0, hop=5.0, min_seg=8.0,
         })
 
     # 边界补偿（默认 0 = 不做任何修正）。
-    # 实测（lang_dev/_test_crop.py，合成中/日硬拼接）：检出的交界**系统性偏晚**
     # 0~0.6×win（win=10 时偏晚 2.5~6 s）。逐窗取证显示机制是——**拼接点之后第一个
     # 纯新语种窗仍被判成旧语种**（mix1 的 [30,40]s 是纯日语，却给出 zh p=0.962）。
-    # ⚠️ 但这**部分是硬拼接接缝（波形突变）造成的伪影**，真实混唱的信道是连续的。
     # 因项目没有真实"中·日混唱"素材（5 首固定曲全是单语种），**边界精度无法在真实
     # 素材上验收** → 故默认**不套用**基于伪影测得的修正（避免过拟合），只提供旋钮。
     # 重叠解析（防御性）：把可能**在时间上重叠**的分片整理成互不重叠的划分——
     # 同一时间点被多个分片覆盖时，取**该区间内更响**的那一段。
     # 说明：当前切分本身不产生重叠（相邻组首尾相接），故这一步现在是**零行为变化**；
-    # 但它是主人要求的落点，一旦将来放开 top-k 多语种候选/改窗策略就会真正生效。
     _n_before = len(segs)
     segs = resolve_overlaps_by_loudness(segs, wav_path=wav_path, data=data, sr=sr)
     meta["overlap_collapsed"] = (_n_before != len(segs))
@@ -583,12 +508,7 @@ def build_manifest(wav_path, segments, mode, extra=None):
 
 
 def manifest_notes(segments, notes_by_index, sort=True):
-    """★ 胶水：把各分片**段内局部时间**的音符拼回**全局时间轴**。
-
-    - `notes_by_index`: {分片 index: [(t0,t1,pitch,vel), ...]}，时间为段内相对秒
-    - 返回全局音符列表；**不做任何合并/去抖**（跨段后处理必须由下游统一做一次）
-    - 缺某分片的音符 → 视为该段无音符（不报错）
-    """
+    """胶水：把各分片**段内局部时间**的音符拼回**全局时间轴**。"""
     out = []
     for s in segments:
         idx = s.get("index")

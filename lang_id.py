@@ -1,40 +1,13 @@
 # -*- coding: utf-8 -*-
 """lang_id.py — 歌曲人声语种识别（LID）适配层。
 
-作用
-----
-给「按语种自动分配人声识别模式」提供**语言判定**这一个前端传感器：
-输入人声轨（或整曲混音），输出每个时间窗的语种与置信度，以及全曲的语种决策。
-
-设计纪律（对齐项目既有约定）
-----------------------------
-1. **零强依赖**：onnxruntime 缺席 / 模型文件缺失 / 任何异常 → 一律返回
-   ``available() is False`` 或 ``None``，**绝不抛异常打断转谱管线**。
-2. **可插拔后端**：内置 `silero_onnx`（Silero LID lang95，95 语种，MIT，
-   ~17MB，onnxruntime 已在项目环境里）。用 `register_backend()` 可加新后端
-   （如 SpeechBrain VoxLingua107 ECAPA 107 语种 / Qwen3-ASR-0.6B 30 语种且原生支持歌唱），
-   上层调用点不需要改。
-3. **不迷信输出**：实测静音/白噪声会给出 ``nn``(Norwegian Nynorsk) 且
-   ``p≈0.68`` 的**假阳性** → 因此判定必须同时过 **置信度门** 与 **能量门**
-   （见 `decide()`），且语种不确定时返回 ``unknown`` 而不是硬猜。
-4. **不改产物**：本模块只读音频、只返回数据，不写任何文件。
-
-ONNX 契约（由 `lang_dev/_probe_onnx.py` 实探，非猜测）
------------------------------------------------------
-- 输入 ``input``  : float32, rank 2, ``[batch, samples]``，原始波形（16 kHz 单声道），
-                    **长度可变**（0.25s~30s 实测均可）
-- 输出 ``output`` : float32, rank 2, ``[batch, 95]``，**未归一化 logits（需 softmax）**
-  （另有第二输出 ``2038`` shape ``[8, 58]`` = 语种**组**头，本项目不用）
-- 标签：``lang_dict_95.json``；关键索引 ``ja=40``、``zh=1``、``zh-CN=18``、
-  ``zh-HK=85``（粤语）、``zh-TW=94``、``en=30``
-
 用法
-----
-    from lang_id import LanguageDetector
-    det = LanguageDetector()
-    if det.available():
-        info = det.detect_song("xxx_vocals.wav")   # 整曲决策
-        wins = det.classify_windows("xxx_vocals.wav")  # 逐窗明细
+-
+from lang_id import LanguageDetector
+det = LanguageDetector()
+if det.available():
+info = det.detect_song("xxx_vocals.wav")   # 整曲决策
+wins = det.classify_windows("xxx_vocals.wav")  # 逐窗明细
 
 CLI: python lang_id.py --audio xxx_vocals.wav [--win 4 --hop 2]
 """
@@ -68,12 +41,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def _exe_dir():
-    """**exe/脚本所在目录**。
-
-    打包成 onefile exe 后 `__file__` 指向解包临时目录（`_MEIPASS`），
-    所以必须优先用 `sys.executable` 的目录 —— 否则挂在 exe 旁边的
-    模型/venv 永远找不到。开发态则等于脚本目录。
-    """
+    """**exe/脚本所在目录**。"""
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return ROOT
@@ -85,15 +53,7 @@ def _bundle_dir():
 
 
 def resolve_resource(rel, extra_env=None):
-    """按**外部优先、打包内含次之、脚本目录兜底**的顺序解析一个资源目录/文件。
-
-    优先级（与项目既有约定一致：`find_*_checkpoint()` 优先 exe 同目录，
-    重度权重外挂在 dist/ 下 mt3/、piano_btd/）：
-      1. 环境变量 `extra_env`（若给）
-      2. **exe 同目录** 下的相对路径（用户可把大权重/venv 放在 exe 旁边）
-      3. 打包内含（`_MEIPASS`，spec 的 datas 落在那里）
-      4. 源码脚本目录（开发态）
-    """
+    """按**外部优先、打包内含次之、脚本目录兜底**的顺序解析一个资源目录/文件。"""
     if extra_env:
         v = os.environ.get(extra_env)
         if v and os.path.exists(v):
@@ -195,13 +155,7 @@ _BACKENDS = {}
 
 
 def register_backend(name, factory):
-    """注册一个 LID 后端。factory(model_dir, **kw) -> 具备 available/predict 的对象。
-
-    新后端的契约（最小实现）：
-        .available() -> bool
-        .label_dict() -> {str(idx): "ja, Japanese"}     # 索引 -> 标签
-        .predict(batch2d: np.ndarray) -> (batch, N) 原始 logits
-    """
+    """注册一个 LID 后端。factory(model_dir, **kw) -> 具备 available/predict 的对象。"""
     _BACKENDS[str(name)] = factory
 
 
@@ -210,9 +164,7 @@ def list_backends():
 
 
 def auto_backend_name():
-    """`auto` 的解析结果：**优先 Qwen3-ASR**（歌唱/带伴奏整曲场景明显更强，
-    且原生支持粤语），不可用则退回 Silero lang95（体积小、零依赖、CPU 秒级）。
-    可用 `TS_LANG_BACKEND` 强制指定任一后端。"""
+    """`auto` 的解析结果：**优先 Qwen3-ASR**（歌唱/带伴奏整曲场景明显更强，"""
     try:
         if QwenAsrSidecarBackend().available():
             return QwenAsrSidecarBackend.NAME
@@ -308,26 +260,7 @@ ENV_QWEN_THREADS = "TS_QWEN_THREADS"
 
 
 class QwenAsrSidecarBackend(object):
-    """Qwen3-ASR 语种识别后端（**独立进程 sidecar**）。
-
-    为什么必须是 sidecar
-    --------------------
-    1. `qwen-asr` 的源码用了 PEP 604（`X | Y`），**Python 3.9 运行时报错**
-       —— 与本项目 `mt3_infer` 当年踩的坑同类；
-    2. 主程序环境是 Python 3.9 + torch 2.8.0+cpu（basic_pitch / demucs 依赖它），
-       而 Qwen3-ASR 需要 Python ≥3.10 + 另一套 torch → **不能污染主环境**。
-
-    所以本后端用 `subprocess` 调 `lang_id_qwen_runner.py`（跑在专用 venv 里），
-    通过 stdin/stdout 交换 JSON。主程序侧只依赖标准库。
-
-    与 Silero 后端的差异（重要）
-    ----------------------------
-    - **不提供 `predict()`**（不做逐窗前向），只提供 `detect_segments()`
-      → `LanguageDetector.classify_windows()` 会自动走分段路径；
-    - **Qwen 不暴露语种概率**（语种是 ASR 的副产物），故 `prob` 一律记 1.0，
-      真正的取舍交给主进程的「时长 × 响度」加权表决与能量门；
-      这也意味着 `TS_LANG_MIN_PROB` 对本后端无效。
-    """
+    """Qwen3-ASR 语种识别后端（**独立进程 sidecar**）。"""
 
     NAME = "qwen3asr"
 
@@ -435,9 +368,7 @@ class LanguageDetector(object):
         self.min_cand_mass = (_env_float(ENV_MIN_CAND_MASS, 0.10) if min_cand_mass is None
                               else float(min_cand_mass))
         # 候选语种白名单：空/None = 不限制（全部 95 类）。
-        # 动机（2026-09-20 实测）：95 类全开时，日语术力口会大量投票给 km/bn/my/nn 这类
         # 完全无关的语种，整曲多数票被稀释。产品实际只需要 zh/ja/en/yue 四套预设，
-        # 把 softmax 限制在候选集内并重新归一，能显著提高信噪比（见 lang_dev/_eval_lid.py）。
         if candidates is None:
             env_c = os.environ.get(ENV_CANDIDATES, "")
             cand = [c.strip() for c in env_c.split(",") if c.strip()] if env_c else None
@@ -496,12 +427,11 @@ class LanguageDetector(object):
         if not self.available():
             return None
         # 分段型后端（Qwen sidecar）不做单段前向 —— 直接返回 None 而不是抛异常。
-        # 踩坑：`segment_by_language()` 末尾补"贴尾窗"时会调本函数，
         # 早期版本让 NotImplementedError 冒出去，导致整条语种分割路径被异常退化掉。
         if not hasattr(self._backend, "predict"):
             return None
         y = np.asarray(y, dtype=np.float32).reshape(-1)
-        if len(y) < int(0.25 * sr):                   # 实测下限 0.25s
+        if len(y) < int(0.25 * sr):                   # 模型支持的最短输入 0.25s
             return None
         db = _dbfs(y)
         try:
@@ -534,13 +464,7 @@ class LanguageDetector(object):
                 "top": top, "db": db, "cand_mass": round(cand_mass, 4), "ok": bool(ok)}
 
     def classify_windows(self, wav_path, win=4.0, hop=2.0, sr=SR, max_windows=400):
-        """滑窗逐段判语种。返回 [{"t0","t1", ...classify_array 的字段}, ...]。
-
-        两条路径：
-          · 后端有 `detect_segments()`（Qwen sidecar）→ 一次性跑完所有窗，再由本进程
-            补齐 `db / ok / prob`，从而保留「响度加权」和「能量门」这些主进程侧的逻辑；
-          · 否则（Silero）→ 逐窗本地前向。
-        """
+        """滑窗逐段判语种。返回 [{"t0","t1", ...classify_array 的字段}, ...]。"""
         if not self.available():
             return []
         if hasattr(self._backend, "detect_segments"):
@@ -566,12 +490,7 @@ class LanguageDetector(object):
         return out
 
     def _decorate_segments(self, raw, wav_path, sr=SR):
-        """把分段后端（Qwen）的原始窗补成与本地后端同构的窗字典。
-
-        - `code`：按 `QWEN_NAME_TO_CODE` 归一（未知名字 -> unknown）
-        - `db`  ：**由主进程自己算**（后端只给时间与语种）→ 响度加权/能量门在本地可复现
-        - `prob`：Qwen 不暴露概率 → 记 1.0（真正的取舍交给时长×响度表决与能量门）
-        """
+        """把分段后端（Qwen）的原始窗补成与本地后端同构的窗字典。"""
         try:
             y, _sr = load_audio_mono16k(wav_path, sr)
         except Exception:
@@ -597,14 +516,9 @@ class LanguageDetector(object):
     def detect_song(self, wav_path, win=4.0, hop=2.0, sr=SR, min_voiced=2):
         """整曲语种决策。
 
-        判据（三选一，全部要过门控）：
-          1. **时长加权多数票**：只统计 ok=True 的窗，按窗长加权；
-          2. 获胜语种必须拿到 >=50% 的**有效票权**（否则 unknown，避免硬猜）；
-          3. 有效窗数 >= min_voiced（默认 2），否则 unknown。
-
         返回 dict（永不为 None，模型不可用时 ok=False）：
-          {"ok","reason","code","name","prob","votes":{code:weight},
-           "n_windows","n_voiced","windows":[...]}
+        {"ok","reason","code","name","prob","votes":{code:weight},
+        "n_windows","n_voiced","windows":[...]}
         """
         res = {"ok": False, "reason": "", "code": "unknown", "name": CODE_NAMES["unknown"],
                "prob": 0.0, "votes": {}, "n_windows": 0, "n_voiced": 0, "windows": []}

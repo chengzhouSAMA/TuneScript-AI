@@ -85,9 +85,12 @@ def main():
                      "def _worker(self, audio, bvid, outdir)", "填 BV 号则自动下载后转谱",
                      "style='CardMuted.TLabel').grid(row=3",   # BV 提示行的续行
                      "if not audio and not bvid:")             # 输入校验（已扩成三路）
-        ok_del = all(any(k in l for k in known_del) for l in dels)
-        check("被删/改的行全部属于已知的旧实现", ok_del,
-              "%d 行" % len(dels))
+        # 删掉**纯注释行**不可能改变行为，所以一律放行；
+        # 其余删除必须命中已知的旧实现，否则视为意外改动。
+        # 注意 difflib 的删除行首还带一个 '-'，判断注释前要先剥掉。
+        ok_del = all(l[1:].strip().startswith("#") or any(k in l for k in known_del)
+                     for l in dels)
+        check("被删/改的行要么是注释、要么属于已知旧实现", ok_del, "%d 行" % len(dels))
     else:
         check("找到备份链", False, "备份目录里没有 transcriber_app.py")
 

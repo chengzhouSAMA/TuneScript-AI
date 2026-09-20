@@ -2143,11 +2143,9 @@ def transcribe_stems(stems, model_path, progress, out_dir=None):
         return transcribe_notes(path, model, progress, label=label, min_len=min_len)
 
     # 人声用 Basic Pitch；人声是单旋律，不需要多声部模型
-    # 【t1 语种分段扒谱 · 2026-09-20】位置按主人指定：**分轨之后、扒谱之前**。
-    # 默认关闭（TS_LANG_SEG 未设或 != '1'）→ 走 else 分支，行为与改动前**逐字节一致**。
-    # 开启后：先对该人声轨做语种分割（LID 在 lang_pipeline 里按"逐时间点音量优先"表决），
-    # 再把每一段单独裁剪出来、用它自己语种的音符提取预设识别，最后按全局时间轴拼回。
-    # 任何一步失败都自动退化为整轨识别；实测与纪律见 lang_dev/_README.md 与 lang_pipeline.py。
+    # TS_LANG_SEG=1 时按语种分段扒谱（分轨之后、扒谱之前）：
+    # 先对该人声轨做语种分割，每段用它自己语种的预设识别，再按全局时间轴拼回。
+    # 默认关闭；任何一步失败都退回整轨识别。
     if os.environ.get('TS_LANG_SEG', '0') == '1':
         try:
             from lang_pipeline import transcribe_vocal_by_language
@@ -3304,8 +3302,8 @@ class App:
                     progress=lambda m: self.q.put(('status', m)))
                 self.q.put(('audio', audio))
             elif not audio and netease:
-                # 网易云：搜索 -> 取直链 -> 下载。默认 exhigh(320k)；
-                # 无损要黑胶会员 cookie（没 cookie 时服务端会静默降级，下面会提示实际音质）。
+                # 网易云：搜索 → 取直链 → 下载。默认 exhigh(320k)；
+                # 无损需会员 cookie，否则服务端会降级（fetch_song 会回报实际音质）。
                 from netease import fetch_song
                 progress('正在搜索网易云音乐…')
                 audio, _ninfo = fetch_song(

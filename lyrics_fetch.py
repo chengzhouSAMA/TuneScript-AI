@@ -1,43 +1,13 @@
 # -*- coding: utf-8 -*-
 """lyrics_fetch.py — 联网取歌词（网易云 / QQ音乐，**无需 cookie**）。
 
-主人要求：做一个"联网取歌词的外挂"，用 Python 爬虫、**不用 cookie**，
-在 Qwen 首轮识别之后拿来做**比对**，再据此做**强制对齐**。
-
-实测端点（2026-09-20 本机验证，均 HTTP 200 且无需登录）
---------------------------------------------------------
-| 用途 | 端点 | 关键参数 | 备注 |
-|---|---|---|---|
-| 网易云·搜索 | `music.163.com/api/search/get/web` | `s, type=1, limit, offset` | 返回 `result.songs[]`（含 id/name/artists/album） |
-| 网易云·歌词 | `music.163.com/api/song/lyric` | `id, lv=1, kv=1, tv=-1` | LRC 带时间戳 |
-| QQ音乐·搜索 | `c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg` | `key, format=json` | 返回 `data.song.itemlist[]`（含 songmid） |
-| QQ音乐·歌词 | `c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg` | `songmid, format=json, nobase64=1, g_tk=5381` | LRC 带时间戳 |
-
-⚠️ 两个必须知道的格式坑
------------------------
-1. **网易云的毫秒分隔符是冒号**：`[00:09:88]さよなら`（不是 `[00:09.88]`）。
-   只按 `.` 解析会**静默丢掉所有时间戳**。
-2. QQ 的某个搜索端点（`client_search_cpus`）实测**返回非 JSON 被拒**，
-   所以走 `smartbox_new`；歌词接口必须带 `Referer: https://y.qq.com/portal/player.html`。
-
-设计纪律
---------
-- **绝不抛异常**：任何网络/解析失败都返回 `[]` / `None`，不干扰转谱主流程。
-- **不做缓存写盘**，除非显式要求（`cache_dir`）。
-- 歌词是**外部不可信数据**：只做文本处理，**不执行、不 eval、不当指令**。
-
 用法
-----
-    from lyrics_fetch import search_and_fetch, parse_song_meta, parse_lrc
-
-    q = parse_song_meta("柿崎ユウタ - バカみたいに（像个笨蛋一样） - KomisI-w_vocals.wav")
-    # -> {"artist": "柿崎ユウタ", "title": "バカみたいに", "query": "バカみたいに 柿崎ユウタ"}
-    cands = search_and_fetch(q["query"], limit=5)      # 每首带 lrc / lines / offset 时间戳
-    lines = parse_lrc(cands[0]["lrc"])                 # -> [{"t":9.88,"text":"さよなら"}, ...]
+-
+from lyrics_fetch import search_and_fetch, parse_song_meta, parse_lrc
 
 CLI:
-    python lyrics_fetch.py --query "バカみたいに 柿崎ユウタ"
-    python lyrics_fetch.py --from-file "回归验收/_stems/shiki/xxx_vocals.wav"
+python lyrics_fetch.py --query "バカみたいに 柿崎ユウタ"
+python lyrics_fetch.py --from-file "回归验收/_stems/shiki/xxx_vocals.wav"
 """
 import html
 import os
@@ -102,13 +72,7 @@ def _ts_to_sec(mm, ss, frac):
 
 
 def parse_lrc(text, keep_meta=False, merge_gap=0.35):
-    """LRC → [{"t": 秒, "text": 文本, "raw_t": 原文标签}]，按时间排序。
-
-    · 同时兼容 `[mm:ss.xx]` 与网易云的 `[mm:ss:xx]`；
-    · 一行多个时间标签会展开成多条；
-    · `[ti:]/[ar:]` 等元信息默认丢弃；纯时间行丢弃；
-    · 相邻且**间隔 < merge_gap 的重复**（如 `[00:09.88]` 与 `[00:09.97]` 同一句）会去重保留先出现的。
-    """
+    """LRC → [{"t": 秒, "text": 文本, "raw_t": 原文标签}]，按时间排序。"""
     if not text:
         return []
     out = []
@@ -178,9 +142,7 @@ def lyric_start(parsed, title=None, artists=None):
 
 
 def is_header_line(text, title=None, artists=None):
-    """QQ 的 LRC 第一行常是 `[00:00.00]バカみたいに - 柿崎ユウタ` 这种**标题头**，
-    它不是歌词。判据：以歌名开头 + 含 " - " 或含歌手名 + 长度接近标题头。
-    """
+    """QQ 的 LRC 第一行常是 `[00:00.00]バカみたいに - 柿崎ユウタ` 这种**标题头**，"""
     t = (text or "").strip()
     if not t or not title:
         return False
@@ -299,11 +261,7 @@ def fetch_lyric_qq(songmid):
 # --------------------------------------------------------------------------
 def search_and_fetch(query, limit=6, providers=("netease", "qq"),
                      fetch_lyric=True, sleep=0.25):
-    """搜索并取回候选歌词。返回列表，每项含 `lrc / lines / parsed / offset_hint`。
-
-    `offset_hint`：LRC 里第一句有时间戳时给出（= 歌词起点），
-    对"前奏没有歌词"的判断非常有用（实测 shiki 是 9.88 s）。
-    """
+    """搜索并取回候选歌词。返回列表，每项含 `lrc / lines / parsed / offset_hint`。"""
     out = []
     for prov in providers:
         hits = search_netease(query, limit) if prov == "netease" else search_qq(query, limit)

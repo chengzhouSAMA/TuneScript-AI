@@ -1,30 +1,5 @@
 # -*- coding: utf-8 -*-
-"""asr_refine.py — 「识别不出来的段落 → 再切割重试 → 谐音音节(罗马音摩拉)分解」。
-
-主人要求（以 `shiki` 前奏为例子）
---------------------------------
-1. 前奏那段**识别不出来的人声**，把它再切一刀、单独拿出来；
-2. 用**谐音音节**的方式识别 —— 不强求"词对"，而是拿到**音节级**的东西；
-3. **日语要切成罗马音**做精确识别。
-
-三段式设计
-----------
-    ┌ ① 判质量 ── asr_refine.score()：假名占比 / 重复度 / 长度 → 0~1 分 + 问题标签
-    ├ ② 再切割重试 ── retry_windows()：低分窗 **强制语种** 后按 1/2、1/4 细窗重试，
-    │                  逐子窗取质量最高者；子窗仍差就并入更细的档位。
-    └ ③ 谐音音节 ── romaji_timeline()：日语文本 → 假名 → **罗马音摩拉** 时间轴，
-                       「一摩拉 ≈ 一个音符」，供扒谱侧对齐。
-
-为什么需要"强制语种"
---------------------
-实测（`lang_dev/_probe_intro_force.py`）：`shiki` 前奏 0~10 s 在自动模式下被
-Qwen3-ASR 判成 **Chinese** 并输出中文乱码（`眨眨眨，车马…` / `想当小丑吗？`），
-而官方歌词其实是 `さよなら / 少しだけ違っただけの愛情表現`。
-判成中文不只是"文本错"，还会把这一段**路由到中文预设** → 错上加错。
-所以重试时必须把语种钉死（`language="Japanese"`）。
-
-依赖：只依赖 `ja_romaji`（其 pykakasi 为可选）。任何失败都不抛异常。
-"""
+"""asr_refine.py — 「识别不出来的段落 → 再切割重试 → 谐音音节(罗马音摩拉)分解」。"""
 import os
 import sys
 
@@ -57,20 +32,20 @@ def retry_windows(spans, call_asr, expect_lang="ja", min_len=2.0, threshold=0.75
     """对给定区间逐个判质量，低分的**再切割重试**（强制语种），取质量最高者。
 
     参数
-    ----
+    -
     spans      : [(t0, t1), ...] 待处理的区间
     call_asr   : `fn(spans, language=None) -> [{"t0","t1","language","text"}, ...]`
-                 **一次调用处理一批区间**（Qwen sidecar 一次进程内跑完整批，
-                 避免每窗重复加载模型）
+    **一次调用处理一批区间**（Qwen sidecar 一次进程内跑完整批，
+    避免每窗重复加载模型）
     expect_lang: 期望语种（用于质量判据），如 "ja"
     min_len    : 子窗最小秒数（默认 2.0；再小 Qwen 会抓不住）
     threshold  : 质量低于它就重试
     max_depth  : 最多切几刀（深度）：1 = 对半，2 = 再对半
 
     返回 (rows, stats)
-      rows  = [{"t0","t1","language","text","score","issues","depth","accepted"}, ...]
-              **已按时间排序、互不重叠**；depth=0 表示原始窗
-      stats = {"n_in","n_retried","n_improved","n_still_bad","asr_calls","spans_called"}
+    rows  = [{"t0","t1","language","text","score","issues","depth","accepted"}, ...]
+    **已按时间排序、互不重叠**；depth=0 表示原始窗
+    stats = {"n_in","n_retried","n_improved","n_still_bad","asr_calls","spans_called"}
     """
     def _log(m):
         if log:
@@ -144,9 +119,6 @@ _LANG_NAME = {"ja": "Japanese", "zh": "Chinese", "yue": "Cantonese", "en": "Engl
 def romaji_timeline(text, t0=None, t1=None, char_times=None, sep_lines=False):
     """日语文本 → 罗马音摩拉时间轴（"谐音音节"的直接产物）。
 
-    - 有 `char_times`（强制对齐给的字符级时间戳）→ 用真实时间；
-    - 否则必须给 t0/t1 → 均匀分配（兜底；对齐精度不如强制对齐）。
-
     返回 {"n_morae","romaji","morae":[{"mora","romaji","t0","t1"}, ...]}
     """
     r = JR.analyze(text)
@@ -197,11 +169,7 @@ def mora_grid(rows):
 
 
 def notes_vs_morae(notes, morae, tol=0.12):
-    """量化「日语的**字**有没有变成**音符**」（项目里"主人反馈③"的客观指标）。
-
-    notes : [(start, end, pitch, velocity), ...]（右手旋律，全局时间轴）
-    morae : mora_grid() 的输出
-    tol   : 摩拉起点与音符起点的容差（秒）
+    """量化「日语的**字**有没有变成**音符**」。
 
     返回 {"n_morae","n_hit","hit_rate","missing":[...]}
     判据：某摩拉的起音时刻附近 tol 秒内存在一个音符起音 → 记命中。

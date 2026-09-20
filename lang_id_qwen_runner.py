@@ -1,42 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lang_id_qwen_runner.py — Qwen3-ASR 语种识别的**独立进程 runner**（sidecar）。
-
-为什么必须独立进程
-------------------
-1. `qwen-asr` 的源码用了 PEP 604（`X | Y`），**Python 3.9 运行时报错**
-   （本项目 `mt3_infer` 当年踩过同一个坑）；
-2. 主程序环境是 Python 3.9 + torch 2.8.0+cpu（basic_pitch / demucs 都依赖它），
-   而 Qwen3-ASR 需要 Python ≥3.10 + 另一套 torch → **绝不能污染主环境**。
-
-因此本 runner 用**单独的 Python 解释器**（如 `lang_id_venv314`）启动，
-通过 stdin/stdout 交换 JSON，主程序只依赖标准库。
-
-调用协议（stdin JSON → stdout JSON）
-------------------------------------
-请求（支持单个 wav，或 wavs×configs 的批量，**模型只加载一次**）::
-
-    {"model": "<目录或 HF id>", "threads": 10, "sr": 16000,
-     "wav": "<路径>",                       # 或
-     "wavs": [{"key": "shiki", "path": "..."}, ...],
-     "win": 10.0, "hop": 5.0,               # 单配置；或
-     "configs": [{"win": 20, "hop": 10}, ...],
-     "max_windows": 200}
-
-响应::
-
-    {"ok": true, "model": "...", "model_load_s": 12.3, "torch": "2.14.0+cpu",
-     "results": [{"key": "shiki", "win": 10, "hop": 5, "duration": 130.2,
-                  "infer_s": 41.2,
-                  "windows": [{"t0":0,"t1":10,"language":"Japanese","text":"..."}, ...]}]}
-    失败: {"ok": false, "error": "..."}
-
-设计纪律
---------
-- **模型只加载一次**：所有 wav × 所有 config 在同一次进程内跑完。
-- 只输出**原始结论**（时间窗 + 语种名 + 文本片段），`prob / db / 门控 / 表决`
-  全部留给主进程 → 窗口策略与本 runner 解耦。
-- 任何异常都返回 `ok=false` + error，**不让主程序崩**。
-"""
+"""lang_id_qwen_runner.py — Qwen3-ASR 语种识别的**独立进程 runner**（sidecar）。"""
 import argparse
 import json
 import os
@@ -125,7 +88,6 @@ def main():
                                           "hop": float(job.get("hop") or job.get("win") or 10.0)}]
         maxw = int(job.get("max_windows") or 200)
         # 强制语种：日语专项要用它把 ASR 钉在日语上，防止它漂到中文
-        # （实测 shiki 前奏 0~10s 在自动模式下被判成 Chinese 并输出中文乱码）。
         force_lang = job.get("language") or None
 
         results = []

@@ -1,30 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lang_pipeline.py — 「语种分割 → 逐段按语种预设扒谱 → 拼回全局时间轴」一步封装。
-
-主人指定的管线位置
-------------------
-    … → Demucs 分轨 → **【这里】语种分割** → 扒谱（人声按语言逐段识别）→ 融合 → 渲染
-
-本模块就是「【这里】」这一步：输入**已分离的人声轨**，输出**全局时间轴上的音符**，
-中间自己做 LID、分段、裁剪、逐段识别、拼回。
-
-四条纪律
---------
-1. **绝不改变出厂默认行为**：只有 `TS_LANG_SEG=1` 时才走分割路径；否则调用方应直接
-   沿用原来的整轨识别（本模块也提供同样的整轨兜底）。
-2. **任何一步失败都退化为整轨识别**，绝不抛异常打断转谱。
-3. **不在源素材目录写任何文件**：裁剪分片一律写到 `out_dir/_langseg/` 或系统临时目录。
-   （项目里 `_merge_accomp_stems` 曾把中间产物写进源目录，见 备忘 附-14.7，是同一类坑。）
-4. **静音段跳过识别**：`勾指起誓` 人声轨前 21.5 s 是 −84 dBFS 数字静音，
-   对它跑 Basic Pitch 既慢又无意义；跳过并记账。
-
-与「相同时间点按音量优先」的关系
---------------------------------
-分段本身由 `audio_crop.segment_by_language(..., loudness_priority=True)` 完成——
-它在**每个时间点**按「窗口概率 × 该窗响度」表决，唱得响的段落在语种判定上话语权更大；
-分片若出现时间重叠，再由 `resolve_overlaps_by_loudness()` 取该区间更响的一段。
-本模块只负责"按分段一路跑下去"，不重复实现该规则。
-"""
+"""lang_pipeline.py — 「语种分割 → 逐段按语种预设扒谱 → 拼回全局时间轴」一步封装。"""
 import os
 import shutil
 import tempfile
@@ -63,27 +38,26 @@ def transcribe_vocal_by_language(vocal_wav, transcribe_fn, progress=None,
     """按语种分割人声轨，逐段用各自的语种预设识别，拼回全局时间轴。
 
     参数
-    ----
+    -
     vocal_wav    : 人声轨 wav 路径
     transcribe_fn: `fn(wav_path, label, min_len) -> [(start, end, pitch, velocity), ...]`
-                   **返回段内局部时间**（调用方就是现有的 `notes_of`）
+    **返回段内局部时间**（调用方就是现有的 `notes_of`）
     progress     : 进度回调（可省略）
     out_dir      : 分片输出目录；None 时用系统临时目录（跑完自动清理）
     win/hop      : LID 窗长/窗移（默认 30/15）。
-                   **为什么是 30/15**（lang_dev/_eval_lid_qwen.py 实测，5 首固定素材）：
-                   `W15/H15` 与 `W30/H15` 都是 strict 4/5、lenient 5/5；`W60/H30` 掉到 3/5。
-                   选 `W30/H15` 是因为 hop=win/2 → **每个时间点被 2 个窗覆盖**，
-                   正是「相同时间点按音量优先」逐点表决所需要的重叠度；
-                   代价是窗数约 2×（一首 3 分钟歌的 LID 从 ~50 s 涨到 ~140 s，纯 CPU）。
+    `W15/H15` 与 `W30/H15` 都是 strict 4/5、lenient 5/5；`W60/H30` 掉到 3/5。
+    选 `W30/H15` 是因为 hop=win/2 → **每个时间点被 2 个窗覆盖**，
+    正是「相同时间点按音量优先」逐点表决所需要的重叠度；
+    代价是窗数约 2×（一首 3 分钟歌的 LID 从 ~50 s 涨到 ~140 s，纯 CPU）。
     min_seg      : 最短分段秒（默认 max(8, win*0.8)）
     candidates   : 候选语种白名单（默认取 TS_LANG_CANDIDATES，或 zh,ja,en,yue）
     backend      : LID 后端（默认 TS_LANG_BACKEND -> auto：Qwen 优先，退 Silero）
 
     返回
-    ----
+    -
     (notes, info)
-      notes : [(start, end, pitch, velocity)] **全局时间轴**
-      info  : dict —— 决策、逐段明细、耗时、是否退化；可写进结果 JSON 供核查
+    notes : [(start, end, pitch, velocity)] **全局时间轴**
+    info  : dict —— 决策、逐段明细、耗时、是否退化；可写进结果 JSON 供核查
     """
     def log(msg):
         if progress:
@@ -106,7 +80,6 @@ def transcribe_vocal_by_language(vocal_wav, transcribe_fn, progress=None,
         info["n_notes"] = len(notes)
         return notes, info
 
-    # ★ 自带门控（不依赖调用方）：未启用时直接整轨识别，**连 LID 都不碰**。
     #   这样即使将来有人在别处调用本函数，也不会意外改变出厂行为。
     if not force and not enabled():
         info["reason"] = "%s 未启用（默认 off）" % ENV_ENABLE_SEG

@@ -1,41 +1,15 @@
 # -*- coding: utf-8 -*-
 """ja_romaji.py — 日语「谐音音节」分解：文本 → 假名 → **罗马音摩拉(mora)** 序列。
 
-为什么是"摩拉"
---------------
-日语是**摩拉计时语言**：一字一音、同音反复极多，唱起来**一个摩拉 ≈ 一个音符**。
-这正是本项目最需要的对齐单位 —— 项目里已有的注释反复强调
-「日语等多音节语言一字一音、同音反复极多，绝不能合并成一条长音」
-（`transcriber_app.py` L939/L1088/L1508）。所以：
-
-    日语的"精确识别" = **把日语切成罗马音摩拉**，再让音节去对齐音符。
-
-摩拉切分规则（标准日语韵律）
-----------------------------
-- 促音 **っ** 自成一摩拉（がっこう = が/っ/こ/う，4 摩拉）；
-- 拨音 **ん** 自成一摩拉；
-- 长音符 **ー** 自成一摩拉；
-- 拗音小假名（ゃゅょ 等）与前一个假名合成**一**摩拉（きょ = 1 摩拉）；
-- 其余「一假名 = 一摩拉」。
-
-罗马音采用 **Hepburn 式**（し=shi、ち=chi、つ=tsu、ふ=fu、じ=ji），
-促音由其后一摩拉的首辅音重复表示（がっこう → ga/k/ko/u），
-长音用重复前一元音表示（コー → ko/o），避免 ā 之类的变音符号带来编码/显示问题。
-
-依赖
-----
-- **可选** `pykakasi`：把汉字转成假名读音。装了就自动用；没装则只处理纯假名文本
-  （汉字会被保留，`kana_coverage` 会提示覆盖率低）。**绝不因为缺依赖而抛异常。**
-
 用法
-----
-    from ja_romaji import analyze, morae_of, to_romaji
-    r = analyze("さようなら")
-    # -> {"kana": "さようなら", "morae": [{"mora":"さ","romaji":"sa"}, ...],
-    #     "romaji": "sa/yo/u/na/ra", "n_morae": 5, "kana_coverage": 1.0}
+-
+from ja_romaji import analyze, morae_of, to_romaji
+r = analyze("さようなら")
+# -> {"kana": "さようなら", "morae": [{"mora":"さ","romaji":"sa"}, ...],
+#     "romaji": "sa/yo/u/na/ra", "n_morae": 5, "kana_coverage": 1.0}
 
 CLI: python ja_romaji.py --text "バカみたいにほら愛してたくせに"
-     python ja_romaji.py --file lyrics.txt
+python ja_romaji.py --file lyrics.txt
 """
 import os
 import re
@@ -261,11 +235,7 @@ def distribute(morae, t0, t1):
 
 
 def from_char_times(text, char_times, t0=0.0):
-    """用**字符级时间戳**（强制对齐结果）给摩拉定时。
-
-    char_times: [(char, start, end), ...]，与 text 的字符顺序一致。
-    汉字一个字符可能读出多个摩拉 → 该字符的时长在其摩拉间均分。
-    """
+    """用**字符级时间戳**（强制对齐结果）给摩拉定时。"""
     kana = text_to_kana(text)
     morae = morae_of(kana)
     out = []
@@ -312,10 +282,7 @@ def repeat_ratio(text, ngram=2):
 
 
 def quality(text, expect_lang=None):
-    """给一段 ASR 输出打质量分（越高越好）与问题标签。
-
-    用于「识别不出来 → 再切割重试」的判据。**不引入模型，纯统计**。
-    """
+    """给一段 ASR 输出打质量分（越高越好）与问题标签。"""
     issues = []
     cs = detect_charset(text)
     rr = repeat_ratio(text, 2)

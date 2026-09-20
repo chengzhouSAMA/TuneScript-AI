@@ -1,37 +1,9 @@
 # -*- coding: utf-8 -*-
 """netease.py — 网易云音乐搜索 + 下载（供转谱使用）。
 
-参考实现思路来自 [Suxiaoqinx/Netease_url](https://github.com/Suxiaoqinx/Netease_url)（MIT），
-本文件是**按实测重新实现**的精简版，只保留转谱需要的部分：搜索、取直链、下载。
-它的 eapi 参数加密方式（AES-128-ECB + md5 摘要）是公开算法，这边自己实现。
-
-## 实测音质（2026-09-20 本机，免登录）
-
-| 歌曲 | 明文 api | eapi standard | eapi exhigh | eapi lossless |
-|---|---|---|---|---|
-| バカみたいに | 320k | 128k | **320k** | 降级到 320k |
-| 光年之外 | 320k | 128k | **320k** | 降级到 320k |
-| 海阔天空 | 失败 | 128k **仅 45 秒试听** | 同 | 同 |
-| 晴天 | 失败 | 404 | 404 | 404 |
-
-结论：**免登录能拿到 320kbps（exhigh）**，对 Demucs / Basic Pitch 足够用；
-FLAC 会被服务端降级（要黑胶会员）。填了自己的 cookie（`TS_NETEASE_COOKIE`）才可能拿到无损。
-
-## 两个必须处理的坑
-
-1. **试听片段**：`freeTrialInfo` 非空表示只给了前 N 秒（如 0~45s）。
-   不检测的话会把 45 秒片段当整首歌转谱 —— 所以默认**拒绝**，除非显式允许。
-2. **服务端会静默降级**：请求 `lossless` 可能返回 320k mp3。
-   所以返回值里必须带上**实际拿到的** `br / level / fmt`，而不是用户请求的那个。
-
-## Cookie
-
-不内置、不硬编码、不写盘（除用户自己放的 `netease_cookie.txt`，已在 .gitignore）。
-优先读环境变量 `TS_NETEASE_COOKIE`（取 `MUSIC_U=...` 整段）。
-
 CLI:
-    python netease.py --search "バカみたいに 柿崎ユウタ"
-    python netease.py --id 2103987239 --outdir ./下载 --quality exhigh
+python netease.py --search "バカみたいに 柿崎ユウタ"
+python netease.py --id 2103987239 --outdir ./下载 --quality exhigh
 """
 import hashlib
 import json
@@ -141,11 +113,7 @@ def song_detail(song_id):
 # eapi 参数加密
 # --------------------------------------------------------------------------
 def eapi_params(url_path, payload):
-    """网易云 eapi 加密：AES-128-ECB(PKCS7) + md5 摘要。
-
-    格式：`nobody{url_path}use{json}md5forencrypt` 取 md5 作 digest，
-    再把 `{url_path}-36cd479b6b5-{json}-36cd479b6b5-{digest}` 整段加密成 hex。
-    """
+    """网易云 eapi 加密：AES-128-ECB(PKCS7) + md5 摘要。"""
     from Crypto.Cipher import AES
     text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     digest = hashlib.md5(("nobody%suse%smd5forencrypt" % (url_path, text)).encode()).hexdigest()
@@ -195,12 +163,7 @@ def _norm(d, source=""):
 
 
 def resolve(song_id, level="exhigh", cookie=None):
-    """取可下载直链。返回 dict（永远不抛异常）。
-
-    尝试顺序（命中即返回；前一步失败才下一步）：
-        明文 api(目标码率) -> 明文 api(320k) -> 明文 api(128k)
-        -> eapi(目标档位) -> eapi(exhigh) -> eapi(standard)
-    """
+    """取可下载直链。返回 dict（永远不抛异常）。"""
     cookie = cookie if cookie is not None else load_cookie()
     tried = []
 
@@ -299,10 +262,7 @@ def download(url, dest, progress=None, chunk=1 << 16, expect_size=0):
 
 def fetch_song(query=None, song_id=None, out_dir=".", level="exhigh",
                cookie=None, pick=0, progress=None):
-    """搜索（或按 id）→ 取直链 → 下载。返回 (路径 or None, info)。
-
-    `pick`：搜索结果的第几个（0 起）。
-    """
+    """搜索（或按 id）→ 取直链 → 下载。返回 (路径 or None, info)。"""
     def log(m):
         if progress:
             try:

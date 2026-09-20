@@ -1,27 +1,5 @@
 # -*- coding: utf-8 -*-
-"""lyrics_match.py — Qwen 首轮识别结果 ↔ 联网歌词 的**比对**。
-
-主人要求：「在第一次识别 qwen 识别歌词后进行比对，然后强制对齐」。
-本模块就是中间那一步，做三件事：
-
-1. **曲目确认**（`pick_best_candidate`）—— 搜索结果里可能混进别的歌
-   （实测搜 `バカみたいに 柿崎ユウタ` 会混进同歌手的 `月が綺麗ねと言われたい！`），
-   用 ASR 文本与各候选歌词的整体相似度挑出真正的那一首；
-2. **逐窗比对**（`match_windows`）—— 对每个 ASR 窗，找出时间上对应、文本最像的歌词行，
-   给出相似度与判定；
-3. **幻觉/无歌词识别** —— 这是本项目最需要的一条：
-   实测 `shiki` 官方 LRC 第一句在 **9.88 s**，所以 **0~9.88 s 根本没有歌词**，
-   而 Qwen 在那里输出了 `じゃじゃじゃま、じゅうじゅうどま。`——**纯幻觉**。
-   比对能把它直接判掉（`no_lyric`），而不是拿去"谐音音节化"。
-
-相似度怎么算（日语关键设计）
-----------------------------
-Qwen 输出**假名为主**（`さようなら。少し開けた角の…`），而歌词是**汉字/假名混排**
-（`少しだけ違っただけの愛情表現`）。直接比字符会误判，所以
-**两边都先用 pykakasi 读成假名**再比（`ja_romaji.text_to_kana`）；pykakasi 缺席时退化为原文比较。
-
-不抛异常、不写盘、不执行外部数据。
-"""
+"""lyrics_match.py — Qwen 首轮识别结果 ↔ 联网歌词 的**比对**。"""
 import difflib
 import os
 import re
@@ -39,11 +17,7 @@ _KEEP = re.compile(r"[ぁ-ゖァ-ヺ一-龥々ーA-Za-z0-9]")
 
 
 def normalize(text, to_kana=True, drop_long_mark=False):
-    """归一化：去空白/标点 → （可选）汉字读音→假名 → 只留假名/汉字/字母数字。
-
-    `drop_long_mark=True` 时去掉长音符 `ー`：ASR 与歌词对长音的处理常不一致
-    （`メランコリー` vs `メランコリ`），去掉后相似度更稳。
-    """
+    """归一化：去空白/标点 → （可选）汉字读音→假名 → 只留假名/汉字/字母数字。"""
     s = text or ""
     s = _STRIP.sub("", s)
     if to_kana:
@@ -56,12 +30,7 @@ def normalize(text, to_kana=True, drop_long_mark=False):
 
 
 def dice_bigram(a, b, to_kana=True, drop_long_mark=True):
-    """字符 bigram 的 Dice 系数（0~1）。
-
-    为什么还要这个：`SequenceMatcher.ratio()` 对**插入/漏识**惩罚很重
-    （实测 ASR 长串里只要有一半跑偏，ratio 就掉到 0.3 以下）；
-    而"识别对了一部分"这件事，用 n-gram 重合度衡量更稳定、更能分出高低。
-    """
+    """字符 bigram 的 Dice 系数（0~1）。"""
     x = normalize(a, to_kana, drop_long_mark)
     y = normalize(b, to_kana, drop_long_mark)
     if len(x) < 2 or len(y) < 2:
@@ -130,15 +99,7 @@ def lines_in_span(cand, t0, t1, pad=0.6):
 
 
 def match_windows(asr_rows, cand, hi=0.50, mid=0.28, pad=0.6):
-    """逐窗比对。返回 (rows, summary)。
-
-    每行新增：`best_score` / `best_text` / `best_t` / `in_span` / `verdict`
-      verdict ∈ {confirmed, weak, hallucination, no_lyric}
-        · no_lyric      —— 该时间窗**歌词里根本没有行**（前奏/间奏）→ 后续不应"谐音音节化"
-        · confirmed     —— 与歌词相似度 >= hi
-        · weak          —— mid ~ hi
-        · hallucination —— 窗内有歌词行，但相似度 < mid（识别跑偏）
-    """
+    """逐窗比对。返回 (rows, summary)。"""
     rows = []
     for r in asr_rows or []:
         t0, t1 = float(r.get("t0", 0.0)), float(r.get("t1", 0.0))
@@ -174,10 +135,7 @@ def match_windows(asr_rows, cand, hi=0.50, mid=0.28, pad=0.6):
 
 
 def aligned_lyric_text(cand, t0=None, t1=None):
-    """取用于**强制对齐**的歌词文本（可按时间段裁剪），返回单个字符串。
-
-    强制对齐需要"连续的文本"，所以按时间顺序拼接（保留换行便于核对）。
-    """
+    """取用于**强制对齐**的歌词文本（可按时间段裁剪），返回单个字符串。"""
     lines = [r["text"] for r in (cand.get("ts_lines") or [])]
     if t0 is not None or t1 is not None:
         lines = [r["text"] for r in (cand.get("ts_lines") or [])
