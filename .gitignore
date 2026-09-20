@@ -25,3 +25,6 @@ mt3/
 *.ncm
 *_五线谱.pdf
 *_大谱表.xml
+
+# 网易云 cookie（本地自用，绝不入库）
+netease_cookie.txt

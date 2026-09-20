@@ -28,6 +28,7 @@ _pk_mods = collect_submodules('pykakasi')
 _new_mods = [
     'lang_id', 'audio_crop', 'lang_modes', 'lang_pipeline',
     'ja_romaji', 'asr_refine', 'lyrics_fetch', 'lyrics_match',
+    'netease', 'bilibili',
     'onnxruntime', 'onnxruntime.capi', 'onnxruntime.capi._pybind_state',
     'onnxruntime.capi.onnxruntime_inference_collection',
     'jaconv', 'deprecated', 'wrapt',

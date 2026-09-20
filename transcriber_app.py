@@ -3138,8 +3138,13 @@ class App:
         self.bvid_var = tk.StringVar()
         self.bvid_entry = ttk.Entry(inner, textvariable=self.bvid_var, width=48)
         self.bvid_entry.grid(row=3, column=1, padx=6, pady=(8, 0), sticky='ew')
-        ttk.Label(inner, text='可选：填 BV 号则自动下载后转谱',
-                  style='CardMuted.TLabel').grid(row=3, column=2, sticky='w', pady=(8, 0))
+        ttk.Label(inner, text='网易云搜索：', style='Card.TLabel').grid(
+            row=4, column=0, sticky='w', pady=(8, 0))
+        self.netease_var = tk.StringVar()
+        self.netease_entry = ttk.Entry(inner, textvariable=self.netease_var, width=48)
+        self.netease_entry.grid(row=4, column=1, padx=6, pady=(8, 0), sticky='ew')
+        ttk.Label(inner, text='可选：填歌名/歌手，搜索下载后转谱(默认 320k)',
+                  style='CardMuted.TLabel').grid(row=4, column=2, sticky='w', pady=(8, 0))
         inner.columnconfigure(1, weight=1)
 
         env = ttk.Frame(self.root, style='TFrame')
@@ -3245,6 +3250,7 @@ class App:
         self.audio_entry.config(state='disabled' if running else 'normal')
         self.outdir_entry.config(state='disabled' if running else 'normal')
         self.bvid_entry.config(state='disabled' if running else 'normal')
+        self.netease_entry.config(state='disabled' if running else 'normal')
         if running:
             self.bar.start(12)
         else:
@@ -3254,8 +3260,9 @@ class App:
         audio = self.audio_var.get().strip()
         outdir = self.outdir_var.get().strip()
         bvid = self.bvid_var.get().strip()
-        if not audio and not bvid:
-            messagebox.showwarning('提示', '请选择音频文件，或输入 B站 BV 号。')
+        netease = self.netease_var.get().strip()
+        if not audio and not bvid and not netease:
+            messagebox.showwarning('提示', '请选择音频文件，或输入 B站 BV 号 / 网易云搜索词。')
             return
         if audio and not os.path.isfile(audio):
             messagebox.showwarning('提示', '音频文件不存在。')
@@ -3265,7 +3272,7 @@ class App:
                 outdir = os.path.dirname(audio)
                 self.outdir_var.set(outdir)
             else:
-                outdir = filedialog.askdirectory(title='选择输出目录(B站音频与转谱产物将保存到此)')
+                outdir = filedialog.askdirectory(title='选择输出目录(下载的音频与转谱产物将保存到此)')
                 if not outdir:
                     return
                 self.outdir_var.set(outdir)
@@ -3282,10 +3289,10 @@ class App:
         self._set_running(True)
         self.status.set('准备中…')
         self.q.put(('ready', None))
-        t = threading.Thread(target=self._worker, args=(audio, bvid, outdir), daemon=True)
+        t = threading.Thread(target=self._worker, args=(audio, bvid, netease, outdir), daemon=True)
         t.start()
 
-    def _worker(self, audio, bvid, outdir):
+    def _worker(self, audio, bvid, netease, outdir):
         try:
             progress = lambda msg: self.q.put(('status', msg))
             self.q.put(('status', '开始处理…'))
@@ -3295,6 +3302,19 @@ class App:
                 audio, _title, _dur = fetch_audio(
                     bvid, save_path=os.path.join(outdir, f'{bvid}.m4a'),
                     progress=lambda m: self.q.put(('status', m)))
+                self.q.put(('audio', audio))
+            elif not audio and netease:
+                # 网易云：搜索 -> 取直链 -> 下载。默认 exhigh(320k)；
+                # 无损要黑胶会员 cookie（没 cookie 时服务端会静默降级，下面会提示实际音质）。
+                from netease import fetch_song
+                progress('正在搜索网易云音乐…')
+                audio, _ninfo = fetch_song(
+                    query=netease, out_dir=outdir,
+                    level=os.environ.get('TS_NETEASE_LEVEL', 'exhigh'),
+                    progress=lambda m: self.q.put(('status', m)))
+                if not audio:
+                    raise RuntimeError('网易云下载失败：%s'
+                                       % ((_ninfo.get('reason') or '未知原因')))
                 self.q.put(('audio', audio))
             results = run_pipeline(audio, outdir, self.model_path, self.ms_exe,
                                    self.ffmpeg, progress,
@@ -3378,6 +3398,11 @@ def cli_main():
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument('--audio')
     ap.add_argument('--bvid', help='B站视频 BV 号：自动下载音频后转谱(无需 Cookie)')
+    ap.add_argument('--netease', help='网易云音乐 歌名/歌手：搜索→下载→转谱(无需 Cookie，默认 320k)')
+    ap.add_argument('--netease-id', type=int, help='网易云歌曲 ID：直接下载后转谱')
+    ap.add_argument('--quality', default='exhigh',
+                    choices=['standard', 'higher', 'exhigh', 'lossless', 'hires'],
+                    help='网易云下载音质，默认 exhigh(320k)；lossless/hires 需黑胶会员 Cookie')
     ap.add_argument('--outdir', required=True)
     ap.add_argument('--no-sep', action='store_true',
                     help='跳过人声/伴奏分离，直接用整体分析')
@@ -3397,8 +3422,19 @@ def cli_main():
                 args.bvid,
                 save_path=os.path.join(args.outdir, f'{args.bvid}.m4a'),
                 progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}\n'))
+        if not audio and (args.netease or args.netease_id):
+            from netease import fetch_song
+            _safe_write(sys.stderr, '[cli] 正在从网易云获取音频…\n')
+            audio, _ninfo = fetch_song(
+                query=args.netease, song_id=args.netease_id, out_dir=args.outdir,
+                level=args.quality,
+                progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}\n'))
+            if not audio:
+                _safe_write(sys.stderr, 'ERROR: 网易云下载失败：%s\n'
+                            % ((_ninfo.get('reason') or '未知原因')))
+                sys.exit(3)
         if not audio:
-            _safe_write(sys.stderr, 'ERROR: 需提供 --audio 或 --bvid\n')
+            _safe_write(sys.stderr, 'ERROR: 需提供 --audio 或 --bvid 或 --netease/--netease-id\n')
             sys.exit(2)
         results = run_pipeline(audio, args.outdir, find_model(), find_musescore(),
                                find_ffmpeg(), progress,

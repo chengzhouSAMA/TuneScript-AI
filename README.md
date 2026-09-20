@@ -1,6 +1,6 @@
 # TuneScript AI — 音乐转谱器
 
-输入音频（或 B 站 BV 号），输出钢琴五线谱 PDF + MIDI + 钢琴 WAV + 分离音轨。
+输入音频（或 B 站 BV 号、或网易云歌名），输出钢琴五线谱 PDF + MIDI + 钢琴 WAV + 分离音轨。
 
 目标是"把整首歌改编成一份能弹的钢琴谱"，不是"给钢琴曲扒谱"。
 所以伴奏不怕杂，怕漏——左手是把非人声轨合起来用的，不挑单一轨。
@@ -31,9 +31,13 @@ python transcriber_app.py --cli --audio 歌曲.mp3 --outdir ./输出 --simple
 
 # 直接给 B 站 BV 号
 python transcriber_app.py --cli --bvid BV1xxxx --outdir ./输出
+
+# 网易云：搜歌名/歌手，自己下载再转谱
+python transcriber_app.py --cli --netease "バカみたいに 柿崎ユウタ" --outdir ./输出
+python transcriber_app.py --cli --netease-id 2103987239 --outdir ./输出
 ```
 
-也有 GUI，双击 `TuneScript AI V0.5.1.exe`。
+也有 GUI，双击 `TuneScript AI V0.5.1.exe`，输入框里填 BV 号或网易云关键词都行。
 
 ## 输出
 
@@ -150,6 +154,42 @@ QQ歌词      c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg       songmid, n
 同一个窗只换 context 首行，结果是 `さよなら` 0.938 / `少しだけ違った…` 0.709 / 不给 0.376。
 一开始我按"严格落在窗内"取，正好把锚点行切掉了，分数反而更差。
 
+### 网易云搜索下载
+
+可以直接搜歌名下载后再转谱，不用自己去别的网站扒音频。做法参考了
+[Netease_url](https://github.com/Suxiaoqinx/Netease_url)（MIT）的思路，
+按实测重写了一份精简版，只留转谱要用的部分。核心是两条接口：
+
+```
+明文  music.163.com/api/song/enhance/player/url          id, ids, br
+eapi  interface3.music.163.com/eapi/song/enhance/player/url/v1   level, encodeType
+```
+
+eapi 要加密参数（AES-128-ECB + md5 摘要，公开算法），明文那条更简单，优先走明文，
+失败再走 eapi。实测的结果：
+
+| 歌 | 明文 api | eapi standard | eapi exhigh | eapi lossless |
+|---|---|---|---|---|
+| バカみたいに | 320k | 128k | 320k | 降级成 320k |
+| 光年之外 | 320k | 128k | 320k | 降级成 320k |
+| 海阔天空 | 失败 | 128k，只有 45 秒 | 同 | 同 |
+| 晴天 | 失败 | 404 | 404 | 404 |
+
+结论：**不登录就能拿 320kbps**，对 Demucs 和 Basic Pitch 够用了。
+FLAC 要黑胶会员，服务端会静默降级——所以返回值里带的是**实际拿到的**音质，
+请求 `lossless` 拿到 320k 会直接告诉你。想看无损就把 cookie 放到
+`TS_NETEASE_COOKIE` 环境变量或 `netease_cookie.txt`（已在 .gitignore 里）。
+
+两个坑：
+
+- **试听片段**。有些歌免登录只给前 45 秒，接口会返回 `freeTrialInfo`。
+  不检测的话会把 45 秒当成整首歌去转谱，所以默认直接拒绝
+  （要强来得设 `TS_NETEASE_ALLOW_TRIAL=1`）。
+- **`--quality lossless` 不一定真是无损**，理由同上。
+
+用 320k 源跑完整流程测过：六轨分离 → 识别 → 回炉后 sim **0.89**，
+和手上已有的同曲素材（0.8889）一致，说明下载源没问题。
+
 ## 环境变量
 
 下面这些都默认关闭，不设就是原来的行为。
@@ -165,6 +205,9 @@ TS_LANG_CANDIDATES       (空)    候选语种白名单，比如 zh,ja,en,yue
 TS_LANG_MODE             off     改成 auto 才启用语种专用识别预设
 TS_ASR_RETRY             0       改 1 启用低质量段再切割重试
 TS_QWEN_PYTHON/_RUNNER/_MODEL     Qwen 外挂路径，一般不用手动设
+TS_NETEASE_COOKIE        (空)    网易云 cookie，填了才可能拿无损
+TS_NETEASE_LEVEL         exhigh  下载音质默认值（standard/higher/exhigh/lossless/hires）
+TS_NETEASE_ALLOW_TRIAL   0       改 1 允许下载只有几十秒的试听片段
 ```
 
 ## 文件说明
@@ -172,6 +215,7 @@ TS_QWEN_PYTHON/_RUNNER/_MODEL     Qwen 外挂路径，一般不用手动设
 ```
 transcriber_app.py      主程序，分离→识别→融合→渲染，带 GUI
 bilibili.py             B 站 BV → DASH 音频流
+netease.py              网易云搜索 + 下载（明文 api / eapi，含试听片段检测）
 
 lang_id.py              语种识别，后端可插拔，找不到模型就降级不报错
 audio_crop.py           裁剪 / 人声分段 / 语种分段
@@ -187,8 +231,9 @@ lang_id_qwen_runner.py  Qwen 的独立进程 runner
 dev/                    开发时用的评测和验证脚本
 ```
 
-`dev/` 里是一些能复跑的脚本：`_selfcheck.py`（33 项自检）、`_eval_lid*.py`（两套 LID 的
-准确率和耗时对照）、`_test_crop.py`（分段边界）、`_repro_context.py`（可复现性）、
+`dev/` 里是一些能复跑的脚本：`_selfcheck.py`（34 项自检）、`_check_gui.py`（GUI 接线）、
+`_eval_lid*.py`（两套 LID 的准确率和耗时对照）、`_test_crop.py`（分段边界）、
+`_test_netease.py`（下载降级/试听/取不到）、`_repro_context.py`（可复现性）、
 `_verify_exe.py` / `_smoke_exe.py`（打包产物检查）等。
 
 ## 一些数字
@@ -198,6 +243,7 @@ dev/                    开发时用的评测和验证脚本
 - 语种识别在 5 首真实曲上：Silero 和 Qwen 都是 4/5 严格正确、5/5（粤语算中文）。
 - 语种分段边界，合成中日混唱，10s 窗 / 5s 窗移：1/1 和 2/2 命中。
 - 摩拉对音符的命中率整体 83.9%，而前奏那段只有 10%——这个指标能定位到"哪几个字没弹出来"。
+- 网易云下载：免登录 320kbps，一首 130 秒的歌 5.2MB、0.3 秒下完；转谱结果 sim 0.89。
 - exe：V0.5 529.5MB → V0.5.1 546.7MB。
 
 ## 已知问题
@@ -208,12 +254,15 @@ dev/                    开发时用的评测和验证脚本
 - 没有歌词的段落不该做音节化，那里出来的都是幻觉，比对会把它标成 `no_lyric`。
 - Qwen 的语种判断是转写的副产物，转写崩了语种也跟着崩。
 - 窗不是越长越好。Qwen 用 60 秒窗准确率反而掉——长窗让它更"自信"，但更不准。
-- 歌词接口是第三方站点，随时可能挂；挂了只返回空，不会中断转谱。
+- 歌词接口和网易云接口都是第三方站点，随时可能变；失败只报错，不会中断转谱。
+- 网易云有些歌免登录只能拿 45 秒试听（会明确拒绝），有些直接 404。
+  无损要会员 cookie，没 cookie 时服务端会静默降级成 320k。
 - zh 和 ja 的识别预设目前是同一组参数，真要分开还得做全量 A/B。
 
 ## 致谢
 
-Demucs、Basic Pitch、ByteDance Piano Transcription、Qwen3-ASR、pykakasi、MuseScore。
+Demucs、Basic Pitch、ByteDance Piano Transcription、Qwen3-ASR、pykakasi、MuseScore，
+以及 [Netease_url](https://github.com/Suxiaoqinx/Netease_url)（网易云解析的接口思路参考）。
 
 ## License
 

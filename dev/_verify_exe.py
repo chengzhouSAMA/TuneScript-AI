@@ -33,6 +33,7 @@ MUST_DATA = [
 MUST_MOD = [
     ("__main__", "主程序（PyInstaller 把入口脚本存为 __main__）"),
     ("lang_id", "LID 适配层"),
+    ("netease", "网易云搜索下载"),
     ("audio_crop", "音频裁剪 / 语言分段"),
     ("lang_modes", "语种预设表"),
     ("lang_pipeline", "语种分割扒谱"),

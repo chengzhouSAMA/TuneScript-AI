@@ -43,37 +43,67 @@ def sha256(path):
 
 
 def main():
-    print("=== [1] 出厂源码改动审计（本次 t1 是**有意**改 transcriber_app.py，故改查 diff 而非旧指纹） ===")
+    print("=== [1] 出厂源码改动审计（备份链：自上次快照以来只应有声明的改动） ===")
     p = os.path.join(ROOT, "transcriber_app.py")
     got = sha256(p)
-    bak = os.path.join(ROOT, "备份", "pre_langseg_20260920_113643", "transcriber_app.py")
-    check("改前备份存在（含 V0.5 出货指纹）", os.path.isfile(bak)
-          and sha256(bak) == SHIPPED_SHA, SHIPPED_SHA[:16] + "…")
-    if os.path.isfile(bak):
-        import difflib
-        with open(bak, "rb") as f:
+    anchor = os.path.join(ROOT, "备份", "pre_langseg_20260920_113643", "transcriber_app.py")
+    check("链锚：改前备份仍等于 V0.5 出货指纹", os.path.isfile(anchor)
+          and sha256(anchor) == SHIPPED_SHA, SHIPPED_SHA[:16] + "…")
+
+    import difflib
+
+    def _diff(old, new):
+        with open(old, "rb") as f:
             a = f.read().decode("utf-8").splitlines(keepends=True)
-        with open(p, "rb") as f:
+        with open(new, "rb") as f:
             b = f.read().decode("utf-8").splitlines(keepends=True)
         d = list(difflib.unified_diff(a, b, n=3))
-        hunks = [l for l in d if l.startswith("@@")]
-        adds = [l for l in d if l.startswith("+") and not l.startswith("+++")]
-        dels = [l for l in d if l.startswith("-") and not l.startswith("---")]
-        check("相对改前备份**只有一处 hunk**", len(hunks) == 1, "%d 个 hunk" % len(hunks))
-        check("删除行恰好 1 行，且是被替换的原调用",
-              len(dels) == 1 and "notes_of(stems['vocals']" in dels[0],
-              (dels[0].strip()[:58] if dels else "(无)"))
-        check("新增行数在预期范围（<=24）", len(adds) <= 24, "新增 %d 行" % len(adds))
+        return (len([l for l in d if l.startswith("@@")]),
+                [l for l in d if l.startswith("+") and not l.startswith("+++")],
+                [l for l in d if l.startswith("-") and not l.startswith("---")])
+
+    # 最近一次备份 = 上一轮声明的状态；当前改动只应包含这一轮声明的东西
+    bdirs = []
+    bd = os.path.join(ROOT, "备份")
+    if os.path.isdir(bd):
+        for name in os.listdir(bd):
+            f = os.path.join(bd, name, "transcriber_app.py")
+            if os.path.isfile(f):
+                bdirs.append((os.path.getmtime(f), name, f))
+    if bdirs:
+        bdirs.sort()
+        _t, last_name, last = bdirs[-1]
+        hunks, adds, dels = _diff(last, p)
+        print("     最近备份：%s" % last_name)
+        print("     diff：%d hunk / +%d / -%d" % (hunks, len(adds), len(dels)))
         joined = "".join(adds)
-        check("新增代码确实只关于 TS_LANG_SEG / lang_pipeline",
-              "TS_LANG_SEG" in joined and "lang_pipeline" in joined)
+        check("自上次备份以来包含本轮声明的 netease 接入",
+              "netease" in joined, "新增 %d 行" % len(adds))
+        check("新增行数在预期范围（<=80）", len(adds) <= 80, "新增 %d 行" % len(adds))
+        known_del = ("notes_of(stems['vocals']", "请选择音频文件", "需提供 --audio 或 --bvid",
+                     "B站音频与转谱产物", "args=(audio, bvid, outdir)",
+                     "def _worker(self, audio, bvid, outdir)", "填 BV 号则自动下载后转谱",
+                     "style='CardMuted.TLabel').grid(row=3",   # BV 提示行的续行
+                     "if not audio and not bvid:")             # 输入校验（已扩成三路）
+        ok_del = all(any(k in l for k in known_del) for l in dels)
+        check("被删/改的行全部属于已知的旧实现", ok_del,
+              "%d 行" % len(dels))
+    else:
+        check("找到备份链", False, "备份目录里没有 transcriber_app.py")
+
+    # 累计上限：防止静默的大规模改动溜进来
+    if os.path.isfile(anchor):
+        _h, adds_all, dels_all = _diff(anchor, p)
+        print("     累计（相对 V0.5 出货）：+%d / -%d" % (len(adds_all), len(dels_all)))
+        check("累计新增 <= 80 行", len(adds_all) <= 80, "+%d" % len(adds_all))
+        check("累计删除 <= 10 行", len(dels_all) <= 10, "-%d" % len(dels_all))
     import ast as _ast
     try:
         _ast.parse(open(p, encoding="utf-8").read())
         check("transcriber_app.py 语法通过", True, "")
     except SyntaxError as e:
         check("transcriber_app.py 语法通过", False, str(e)[:60])
-    check("源码已按本次改动变化（≠ 旧出货指纹）", got != SHIPPED_SHA, got[:16] + "…")
+    check("源码已按本轮改动变化（≠ V0.5 出货指纹）", got != SHIPPED_SHA, got[:16] + "…")
 
     print("=== [2] 冻结基线未被写入 ===")
     stems = os.path.join(ROOT, "回归验收", "_stems")
