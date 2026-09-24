@@ -1487,4 +1487,112 @@ _SELF_SCROLL = (tk.Text, tk.Listbox, ttk.Treeview, ttk.Combobox, ttk.Spinbox)
 | `lang_dev/_verify_exe.py` | ui_kit 内容层 3 项 |
 | `lang_dev/_demo_scroll.py` | **新增**：真窗口滚动演示，打印 yview |
 
+---
+---
+
+# 第十一部分：扫码「扫进去就过期」的真正根因
+
+> 主人原话：**「网易云扫码还是不行，扫进去就过期」**。
+
+## 68. 先排除掉的猜测
+
+| 猜测 | 怎么验的 | 结果 |
+|---|---|---|
+| 二维码一开就过期 | `_probe_qr_ttl.py` 长轮询 | **否**：没人扫时连 138 次 801，第 **301.4 s** 才 800 |
+| 接口/加密写错了 | `_probe_qr_login.py` 打原始返回 | **否**：unikey 200、轮询 801 都正常 |
+| 该用 weapi 而不是 eapi | `_probe_weapi_qr.py` 用 NeteaseCloudMusicApi 同款 weapi 重跑 | **否**：两条路都能拿 key、都能轮询（同一个 key 用 eapi 轮询也返回 801），说明 key 是同一个池子 |
+
+## 69. ★ 根因：登录成功的 cookie 只在 **响应头 Set-Cookie** 里，而旧代码只读 body
+
+`_probe_qr_cookie_header.py` 打出来的：
+
+```
+--- 1) unikey ---
+    Set-Cookie: NMTID=00OSUC3LlZZ4UMDHEMlndAhOfHjy5MAAAGg04ogOQ; Max-Age=315360000; …
+    body code : 200
+    body 里有 cookie 字段: False
+--- 2) poll（没人扫，预期 801）---
+    Set-Cookie: None
+    body code : 801
+    body 里有 cookie 字段: False
+```
+
+**unikey 那一步服务端就下发了 `NMTID`（网易云的匿名设备标识），而旧代码把它扔了** ——
+`_eapi_post` 只 `return r.json()`，响应头里的 cookie 全丢。后果是一串连锁反应：
+
+1. 取 key 时服务端发了 `NMTID=A`，丢掉；
+2. 之后每次轮询都是**不带 NMTID 的新连接**，在服务端看来每次都是"另一个设备"；
+3. 手机扫码确认后，凭据要通过 `Set-Cookie` 回给**当初那个会话**；
+   而我们既不认这个会话（没带 NMTID），又只读 body ——
+   **`code=803` 明明成功了却拿不到 cookie**；
+4. 代码见 `code==803 and cookie` 不成立 → `return` 继续轮询；
+5. 而已经被"消费"掉的 key 下一次轮询返回 **800**；
+6. 800 被映射成「二维码已过期」→ **界面上就是你看到的「扫进去就过期」**。
+
+对照：NeteaseCloudMusicApi 的 `login_qr_check.js` 专门写了
+`cookie: result.cookie.join(';')` —— 就是把响应头的 cookie 手动塞回 body，
+因为**正文里没有**。我们缺的就是这一步。
+
+## 70. 改法（`netease_login.py`）
+
+1. **整个扫码流程共用一个 `requests.Session`**（`_session()`）：
+   unikey 那一步拿到的 `NMTID` 自动带到后面每一次轮询。
+2. **`_eapi_post` 把 cookie 合并进返回值**：本次响应的 `Set-Cookie` 优先，
+   其次是 Session 里累积的；并记下 `_cookie_from` / `_cookie_names` 便于排查。
+3. **`generate_qr_key()` 每次先 `_reset_session()`** —— 开一轮干净会话，
+   不会把上一次登录的旧 `MUSIC_U` 混进来。
+4. **`logout()` 也重置会话**。
+5. **`poll_qr_key()` 在 `803 但没 cookie` 时说清楚原因**，不再让上层无声重试；
+   `ui_app` 的窗口会把这句话显示出来并自动换一张重来。
+
+实测（真实联调，`_probe_qr_cookie_header.py` 末段）：
+
+```
+unikey = 1456e67a-…  poll code = 801
+cookie 来源 = header(0)/jar(1)      ← NMTID 现在跟着走了
+cookie 字段 = ['NMTID']
+session 里的 cookie = ['NMTID']
+```
+
+## 71. 验证
+
+| 项 | 结果 |
+|---|---|
+| `lang_dev/_selfcheck.py` | **87/87**（§[11] 新增 6 项：Set-Cookie 合并、NMTID 带上、来源标注、803 拿到 cookie、803 无凭据要报错、每轮干净会话） |
+| `lang_dev/_check_newui.py` / `_check_gui.py` | 40/40 / 0 问题 |
+| `lang_dev/_verify_exe.py` | **45/45**（内容层加 `_reset_session`、`_cookie_from`） |
+
+## 72. ⚠️ 两个如实交代
+
+- **我没法自己"扫一下"验证**：手机端要多一台设备和一个账号。上面能给的证据是
+  「旧代码必然拿不到 cookie」这条链（`Set-Cookie: NMTID=…` + `body 里有 cookie 字段: False`
+  是服务端亲口说的），以及修好后的联调输出。**如果还是不行，窗口里那块小日志现在会把
+  每次轮询的 `code` 和"有没有拿到凭据"都写出来，把那一行发我。**
+- **重打 exe 时我误杀了一个正在运行的实例**（PID 18768，有窗口，多半是主人自己刚在试扫码）。
+  原因是构建要删 `dist\TuneScript AI V0.5.1.exe`，被占用会直接
+  `PermissionError: [WinError 5]` 而**构建静默失败**（第一次就是这么失败的：跑完两个
+  ERROR 行就结束，exe 的 sha 跟备份一模一样）。以后重打前先确认没有实例在跑。
+
+## 73. 出货 exe（本轮）
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 574,365,345 B（547.8 MB） |
+| sha256 | `43CD14DA8E7BA0F15EA09F84DA05848F15F6406DCB944E18ABA59B1E7556DAD6` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `5FE8D7AA…`） |
+| 归档校验 | 45 项，0 问题 |
+
+## 74. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `netease_login.py` | `_session` / `_reset_session`；`_eapi_post` 合并 Set-Cookie 并标注来源；`generate_qr_key` 开干净会话；`logout` 重置会话；`poll_qr_key` 803 无凭据时明确报错 |
+| `ui_app.py` | 扫码窗口：803 但无凭据时显示原因并自动换码，不再无声重试 |
+| `lang_dev/_probe_weapi_qr.py` | **新增**：weapi/eapi 对照实验 |
+| `lang_dev/_probe_qr_cookie_header.py` | **新增**：直接看 Set-Cookie（根因证据） |
+| `lang_dev/_selfcheck.py` | §[11] 新增 6 项扫码凭据检查 |
+| `lang_dev/_verify_exe.py` | 内容层加 2 项 |
+| `README.md` | 扫码一节补「凭据在 Set-Cookie 里」的说明 |
+
 

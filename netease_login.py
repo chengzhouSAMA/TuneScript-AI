@@ -79,6 +79,9 @@ ST_SCANNED = 802       # 已扫码，待确认
 ST_OK = 803            # 登录成功
 ST_EXPIRED = 800       # 二维码过期
 
+# 扫码流程共用的 HTTP 会话（见 `_session()`）
+_SESSION = None
+
 
 def _eapi_params(path, payload):
     """复用 netease.py 里的 eapi 加密（AES-128-ECB + md5 摘要）。"""
@@ -94,22 +97,71 @@ def _eapi_url(path):
     return EAPI_HOST + path.replace("/api/", "/eapi/", 1)
 
 
+def _session():
+    """整个扫码流程共用一个 requests.Session。
+
+    为什么要共用：unikey 那一步服务端会下发 cookie，轮询时得带着；
+    每次开新连接等于每次都"换了个人"，登录成功后拿到的凭据也对不上。
+    """
+    global _SESSION
+    if _SESSION is None:
+        _SESSION = requests.Session()
+    return _SESSION
+
+
+def _reset_session():
+    """重新开始一次扫码：把上一次登录留下的 cookie 清干净。"""
+    global _SESSION
+    try:
+        if _SESSION is not None:
+            _SESSION.cookies.clear()
+    except Exception:
+        pass
+    _SESSION = requests.Session()
+    return _SESSION
+
+
 def _eapi_post(path, payload, cookies=None):
-    """发一个 eapi 请求，自动补 header 配置。"""
+    """发一个 eapi 请求，自动补 header 配置。
+
+    ⚠️ **登录成功的 cookie 只在响应头 `Set-Cookie` 里，body 里没有。**
+    所以这里把响应（以及本次登录 Session）拿到的 cookie 合并进返回值的 `cookie` 字段。
+    漏掉这一步的后果很隐蔽：803 明明成功了却拿不到凭据 → 代码继续轮询 →
+    已经被消费掉的 key 下一次返回 800 → 界面上显示「扫进来就过期」。
+    """
     cfg = dict(DEFAULT_CONFIG)
     cfg["requestId"] = str(random.randrange(20000000, 30000000))
     body = dict(payload)
     body.setdefault("header", json.dumps(cfg, separators=(",", ":")))
     ck = dict(DEFAULT_COOKIES)
     ck.update(cookies or {})
-    r = requests.post(_eapi_url(path), data={"params": _eapi_params(path, body)},
-                      headers={"User-Agent": UA_EAPI, "Referer": REFERER,
-                               "Content-Type": "application/x-www-form-urlencoded"},
-                      cookies=ck, timeout=20)
+    s = _session()
+    r = s.post(_eapi_url(path), data={"params": _eapi_params(path, body)},
+               headers={"User-Agent": UA_EAPI, "Referer": REFERER,
+                        "Content-Type": "application/x-www-form-urlencoded"},
+               cookies=ck, timeout=20)
     try:
-        return r.json()
+        j = r.json()
     except Exception:
         return {"code": -1, "raw": r.text[:200]}
+    if not isinstance(j, dict):
+        return {"code": -1, "raw": str(j)[:200]}
+    # 本次响应的 Set-Cookie 优先，其次才是 Session 里累积到的
+    jar = {}
+    for c in s.cookies:
+        jar[c.name] = c.value
+    n_resp = 0
+    for c in r.cookies:
+        jar[c.name] = c.value
+        n_resp += 1
+    if jar:
+        if not j.get("cookie"):
+            j["cookie"] = ";".join("%s=%s" % (k, v) for k, v in jar.items())
+            j["_cookie_from"] = "header(%d)/jar(%d)" % (n_resp, len(jar))
+        else:
+            j["_cookie_from"] = "body"
+        j["_cookie_names"] = sorted(jar)
+    return j
 
 
 # --------------------------------------------------------------------------
@@ -170,7 +222,8 @@ def save_cookie(cookie):
 
 
 def logout():
-    """删除本地 cookie 文件。"""
+    """删除本地 cookie 文件，并把扫码会话里的凭据一起清掉。"""
+    _reset_session()
     p = cookie_path()
     if os.path.isfile(p):
         os.remove(p)
@@ -234,7 +287,8 @@ def quality_hint(cookie=None):
 # 扫码登录
 # --------------------------------------------------------------------------
 def generate_qr_key():
-    """取二维码 key；失败返回 (None, 原因)。"""
+    """取二维码 key；失败返回 (None, 原因)。每次调用都开一轮干净的会话。"""
+    _reset_session()
     j = _eapi_post(UNIKEY_API, {"type": 1})
     if j.get("code") == 200 and j.get("unikey"):
         return j["unikey"], "ok"
@@ -259,7 +313,13 @@ def poll_qr_key(unikey):
     j = _eapi_post(QRLOGIN_API, {"key": unikey, "type": 1})
     code = j.get("code")
     if code == ST_OK:
-        return code, j.get("cookie"), "登录成功"
+        ck = j.get("cookie")
+        if ck:
+            return code, ck, "登录成功"
+        # 拿到了 803 却没有凭据：说清楚来源，别让上层继续傻轮询
+        return code, None, ("登录成功但没拿到 cookie（来源 %s，字段 %s）"
+                            % (j.get("_cookie_from") or "无",
+                               ",".join(j.get("_cookie_names") or []) or "无"))
     if code == ST_SCANNED:
         return code, None, "已扫码，请在手机上确认"
     if code == ST_EXPIRED:

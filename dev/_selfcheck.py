@@ -264,6 +264,57 @@ def main():
     finally:
         nl.COOKIE_DIR_OVERRIDE = _bak
         shutil.rmtree(_tmp, ignore_errors=True)
+
+    # 扫码登录：cookie 只在 Set-Cookie 里 —— 这一条是"扫进来就过期"的根因，必须钉住
+    class _Ck(object):
+        def __init__(self, n, v):
+            self.name, self.value = n, v
+
+    class _Resp(object):
+        def __init__(self, body, cookies):
+            self._body, self.cookies = body, cookies
+
+        def json(self):
+            return dict(self._body)
+
+    class _Sess(object):
+        def __init__(self, jar, resp_cookies):
+            self.cookies = jar
+            self._rc = resp_cookies
+
+        def post(self, *a, **k):
+            return _Resp({'code': 803}, self._rc)
+
+    _bak3 = getattr(nl, '_SESSION', None)
+    try:
+        # unikey 那一步服务端会下发 NMTID；轮询时得带着
+        jar = [_Ck('NMTID', 'anon-device-id')]
+        nl._SESSION = _Sess(jar, [_Ck('MUSIC_U', 'deadbeef'),
+                                  _Ck('__csrf', 'cafebabe')])
+        j = nl._eapi_post(nl.QRLOGIN_API, {'key': 'k', 'type': 1})
+        got = j.get('cookie') or ''
+        check("响应头 Set-Cookie 被合并进 cookie 字段",
+              'MUSIC_U=deadbeef' in got and '__csrf=cafebabe' in got, got[:60])
+        check("Session 里累积到的 NMTID 也带上",
+              'NMTID=anon-device-id' in got, got[:60])
+        check("能说清 cookie 来源", j.get('_cookie_from') == 'header(2)/jar(3)',
+              j.get('_cookie_from'))
+        c, ck, msg = nl.poll_qr_key('k')
+        check("803 时就能拿到 cookie", c == nl.ST_OK and (ck or '').startswith('NMTID='))
+    finally:
+        nl._SESSION = _bak3
+    # 803 但真没有 cookie 时必须说清楚，而不是静默继续轮询
+    _orig_post = nl._eapi_post
+    nl._eapi_post = lambda *a, **k: {'code': nl.ST_OK, '_cookie_from': 'header(0)/jar(0)'}
+    try:
+        c, ck, msg = nl.poll_qr_key('k')
+        check("803 无凭据时给出明确原因，不静默重试",
+              c == nl.ST_OK and ck is None and '没拿到' in msg, msg)
+    finally:
+        nl._eapi_post = _orig_post
+    check("generate_qr_key 每次开一轮干净会话",
+          hasattr(nl, '_reset_session') and nl._reset_session() is not None)
+
     # 优先级的第三档：打包时烤进 exe 的默认值（用假模块模拟，不碰真密钥）
     _bak2 = nl.COOKIE_DIR_OVERRIDE
     _tmp2 = tempfile.mkdtemp(prefix="nl_bake_")

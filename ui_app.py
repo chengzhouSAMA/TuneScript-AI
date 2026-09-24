@@ -275,7 +275,14 @@ def qr_login_dialog(parent, on_success=None):
             win.after(2500, lambda: poll(gen, unikey))
             return
         el = time.time() - state['t0']
-        if code == NL.ST_OK and cookie:
+        if code == NL.ST_OK:
+            if not cookie:
+                # 803 却说没凭据：多半是响应头里的 Set-Cookie 没被收上来。
+                # 说清楚、换一张重来，别让用户看到"什么都没发生"。
+                st.set('扫码成功了，但没拿到登录凭据：%s\n正在重试…' % msg)
+                add_log('code=803 但没有 cookie：%s' % msg)
+                win.after(500, new_qr)
+                return
             try:
                 NL.save_cookie(cookie)
                 st.set('登录成功，已保存到 netease_cookie.txt')

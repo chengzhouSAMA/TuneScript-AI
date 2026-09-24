@@ -148,7 +148,9 @@ def main():
     print("\n=== 内容层（netease_login 里的 cookie 定位方式）===")
     WANT_CONST = (("netease_cookie.txt", "cookie 文件名"),
                   ("frozen", "冻结态判断（sys.frozen）"),
-                  ("executable", "取 exe 自身目录（sys.executable）"))
+                  ("executable", "取 exe 自身目录（sys.executable）"),
+                  ("_reset_session", "扫码共用一轮干净会话"),
+                  ("_cookie_from", "说清凭据来自响应头还是 body"))
     # 主程序不在 PYZ 里 —— 去 CArchive 的脚本层找（见本函数末尾的「脚本层」）
     WANT_MAIN = (("_enforce_octave_gap", "R1 左右手强制拉开一个八度"),
                  ("_hand_gap_min", "R1 间隔度量"),
