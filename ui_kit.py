@@ -199,8 +199,7 @@ class Page(tk.Frame):
         self.busy = False
         self.title = title
         self._build_head(title, subtitle)
-        self.body = tk.Frame(self, bg=N_BG)
-        self.body.pack(fill='both', expand=True, padx=16, pady=(0, 8))
+        self._build_scroll()
         self._build_log()
         self.after(120, self._poll)
 
@@ -214,20 +213,26 @@ class Page(tk.Frame):
                       wraplength=820, justify='left').pack(anchor='w', pady=(2, 0))
 
     def _build_log(self):
-        outer = tk.Frame(self, bg=N_CARD, highlightbackground=N_BORDER,
-                         highlightthickness=1, bd=0)
-        outer.pack(fill='x', side='bottom', padx=16, pady=(0, 12))
+        self._log_card = tk.Frame(self, bg=N_CARD, highlightbackground=N_BORDER,
+                                  highlightthickness=1, bd=0)
+        # 日志卡固定贴在底部，**不参与滚动** —— 滚的是上面的内容区
+        self._log_card.pack(fill='x', side='bottom', padx=16, pady=(0, 12))
+        outer = self._log_card
         bar = tk.Frame(outer, bg=N_CARD)
         bar.pack(fill='x', padx=10, pady=(8, 0))
         self.status = tk.StringVar(value='就绪。')
         ttk.Label(bar, textvariable=self.status, style='NCardMuted.TLabel').pack(side='left')
         ttk.Button(bar, text='清空', style='NGhost.TButton',
                    command=self.clear_log).pack(side='right')
+        self._log_toggle = ttk.Button(bar, text='收起', style='NGhost.TButton',
+                                      command=self.toggle_log)
+        self._log_toggle.pack(side='right', padx=4)
         self.bar = ttk.Progressbar(outer, mode='indeterminate', length=600)
         self.bar.pack(fill='x', padx=10, pady=(4, 4))
-        wrap = tk.Frame(outer, bg=N_CARD)
-        wrap.pack(fill='both', padx=10, pady=(0, 10))
-        self.log_text = tk.Text(wrap, height=7, bg='#fbfcfe', fg=N_TEXT,
+        self._log_wrap = tk.Frame(outer, bg=N_CARD)
+        self._log_wrap.pack(fill='both', padx=10, pady=(0, 10))
+        wrap = self._log_wrap
+        self.log_text = tk.Text(wrap, height=5, bg='#fbfcfe', fg=N_TEXT,
                                 relief='flat', highlightthickness=1,
                                 highlightbackground=N_BORDER, wrap='word',
                                 font=('Consolas', 9))
@@ -236,6 +241,98 @@ class Page(tk.Frame):
         self.log_text.pack(side='left', fill='both', expand=True)
         sb.pack(side='right', fill='y')
         self.log_text.configure(state='disabled')
+
+    # ---- 内容区滚动（滚轮 / 滚动条）----
+    def _build_scroll(self):
+        """内容区做成可滚动的：窗口不够高就滚动看，不用把窗口拉大。
+
+        `self.body` 是子类往里面放卡片的那个容器，这里把它挂进 Canvas。
+        日志卡不走这里（它固定在底部，见 `_build_log`）。
+        """
+        self._scroll_wrap = tk.Frame(self, bg=N_BG)
+        self._scroll_wrap.pack(fill='both', expand=True, pady=(0, 8))
+        self._vbar = ttk.Scrollbar(self._scroll_wrap, orient='vertical')
+        self._canvas = tk.Canvas(self._scroll_wrap, bg=N_BG, highlightthickness=0, bd=0)
+        self._vbar.configure(command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vbar.set)
+        # 滚动条先 pack（右侧），Canvas 再吃掉剩余宽高
+        self._vbar.pack(side='right', fill='y')
+        self._canvas.pack(side='left', fill='both', expand=True)
+        self.body = tk.Frame(self._canvas, bg=N_BG)
+        self._body_win = self._canvas.create_window((12, 6), window=self.body,
+                                                    anchor='nw')
+        self.body.bind('<Configure>', self._on_body_configure)
+        self._canvas.bind('<Configure>', self._on_canvas_configure)
+        self._wheel_bound = False
+        self._vbar_visible = True
+
+    def _on_body_configure(self, _e=None):
+        try:
+            self._canvas.configure(scrollregion=self._canvas.bbox('all'))
+        except Exception:
+            pass
+        self._sync_scrollbar()
+
+    def _on_canvas_configure(self, e):
+        # 让内容跟着窗口宽度走（横向不出现滚动条）
+        try:
+            self._canvas.itemconfigure(self._body_win, width=max(1, e.width - 24))
+        except Exception:
+            pass
+        self._sync_scrollbar()
+
+    def _sync_scrollbar(self):
+        """内容装得下就把滚动条收起来，装不下再显示。"""
+        try:
+            need = self.body.winfo_reqheight() > self._canvas.winfo_height() + 2
+        except Exception:
+            return
+        if need and not self._vbar_visible:
+            self._vbar.pack(side='right', fill='y', before=self._canvas)
+            self._vbar_visible = True
+        elif not need and self._vbar_visible:
+            self._vbar.pack_forget()
+            self._vbar_visible = False
+
+    # 自己管滚动的控件，别抢它们的滚轮
+    _SELF_SCROLL = (tk.Text, tk.Listbox, ttk.Treeview, ttk.Combobox, ttk.Spinbox)
+
+    def bind_wheel(self, widget=None):
+        """给页面里所有控件挂上滚轮事件。
+
+        为什么要递归挂：Tk 的 `<MouseWheel>` 只发给指针底下的那个控件，
+        在 `Page` 上挂一次是收不到"指针停在某个卡片/按钮上"的滚轮的。
+        （子类建完控件后调用一次；`Shell` 建完页面也会替它们调一次。）
+        """
+        w = widget if widget is not None else self
+        if not isinstance(w, self._SELF_SCROLL):
+            try:
+                w.bind('<MouseWheel>', self._on_wheel, add='+')
+            except Exception:
+                pass
+        for c in w.winfo_children():
+            self.bind_wheel(c)
+        self._wheel_bound = True
+
+    def _on_wheel(self, event):
+        if not self.winfo_ismapped():
+            return
+        try:
+            step = int(-event.delta / 120) or (-1 if event.delta > 0 else 1)
+            self._canvas.yview_scroll(step, 'units')
+        except Exception:
+            pass
+
+    def toggle_log(self):
+        """收起/展开底部日志 —— 小屏幕上想多看内容区时用。"""
+        if self._log_wrap.winfo_manager():
+            self._log_wrap.pack_forget()
+            self.bar.pack_forget()
+            self._log_toggle.configure(text='展开日志')
+        else:
+            self.bar.pack(fill='x', padx=10, pady=(4, 4))
+            self._log_wrap.pack(fill='both', padx=10, pady=(0, 10))
+            self._log_toggle.configure(text='收起')
 
     # ---- 日志 / 状态 ----
     def log(self, msg):

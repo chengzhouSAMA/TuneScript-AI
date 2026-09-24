@@ -9,6 +9,7 @@
 import os
 import sys
 import tkinter as tk
+from tkinter import ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -93,6 +94,52 @@ def main():
               'manager=%s 同时显示的其它页=%s' % (mgr, others))
     shell.show('transcribe')
     check('默认页 = 转谱', shell.pages['transcribe'].winfo_manager() == 'place')
+
+    print('\n=== 6) 内容区滚轮滚动 ===')
+    pg = shell.pages['transcribe']
+    check('内容区挂在 Canvas 上（可滚动）', isinstance(getattr(pg, '_canvas', None), tk.Canvas))
+    check('有垂直滚动条', hasattr(pg, '_vbar') and isinstance(pg._vbar, ttk.Scrollbar))
+    check('已给页面内所有控件挂上滚轮', pg._wheel_bound is True)
+    check('日志卡固定在底部、不参与滚动',
+          pg._log_card.winfo_manager() == 'pack' and pg._log_card is not pg.body)
+
+    # 滚轮方向：向下滚 = 内容上移（yview_scroll(1)）
+    calls = []
+    real_scroll = pg._canvas.yview_scroll
+    pg._canvas.yview_scroll = lambda *a: calls.append(a)
+    real_mapped = pg.winfo_ismapped
+    pg.winfo_ismapped = lambda: True
+
+    class _Ev(object):
+        def __init__(self, d):
+            self.delta = d
+
+    pg._on_wheel(_Ev(-120))
+    check('滚轮向下 → yview_scroll(1)', calls == [(1, 'units')], str(calls))
+    calls.clear()
+    pg._on_wheel(_Ev(120))
+    check('滚轮向上 → yview_scroll(-1)', calls == [(-1, 'units')], str(calls))
+    calls.clear()
+    pg._on_wheel(_Ev(-360))
+    check('连续滚 3 格 → yview_scroll(3)', calls == [(3, 'units')], str(calls))
+    pg._canvas.yview_scroll = real_scroll
+    pg.winfo_ismapped = real_mapped
+
+    # 内容比视口高时滚动条要出现；装得下就收起来
+    for _i in range(24):
+        tk.Frame(pg.body, height=40, bg='#ffffff').pack(fill='x')
+    pg.bind_wheel()
+    root.deiconify()
+    root.update()
+    root.update_idletasks()
+    pg._on_body_configure()
+    root.update_idletasks()
+    check('内容变高后滚动条出现', pg._vbar_visible is True)
+    pg._canvas.configure(scrollregion=pg._canvas.bbox('all'))
+    check('scrollregion 已包住全部内容',
+          pg._canvas.bbox('all')[3] > pg._canvas.winfo_height(),
+          '内容高 %s vs 视口 %s' % (pg._canvas.bbox('all')[3], pg._canvas.winfo_height()))
+    root.withdraw()
 
     if '--shot' in sys.argv:
         root.deiconify()

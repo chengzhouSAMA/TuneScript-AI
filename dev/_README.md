@@ -1384,4 +1384,107 @@ TS_UI_GEOMETRY=1120x740+10+10   钉死窗口位置
 | `lang_dev/_selfcheck.py` | 登记本轮删除行为"已知旧实现" |
 | `README.md` | cookie 一节补「也可以直接在界面里填」 |
 
+---
+---
+
+# 第十部分：内容区可以滚轮滚动了
+
+> 主人给的剪贴板截图：窗口最大化后，网易云页的**下载区被切在屏幕外面看不到**
+> （截图里能看到"无损/Hi-Res 需要会员 cookie…"那行紧贴着任务栏），
+> 要求：**「把界面做一个可以使用滚轮滚动查看的样子」**。
+
+## 61. 问题
+
+新 UI 的每一页都是"标题 + 内容卡片 + 底部日志卡"，内容一多就顶出窗口下沿。
+窗口拉大能缓解，但**最大化之后还是会被日志卡挤掉**（日志卡固定占 5~7 行文本的高度）。
+
+## 62. 做法：内容区进 Canvas，日志卡留在底部
+
+`ui_kit.Page` 里把 `self.body` 挂进 `tk.Canvas`：
+
+```
+Page
+├── head（标题/副标题，固定）
+├── _scroll_wrap            ← 可滚动区（pack expand）
+│   ├── _vbar  ttk.Scrollbar
+│   └── _canvas ──(_body_win)── body   ← 子类往 body 里塞卡片
+└── _log_card（状态/进度条/日志，固定贴底，**不参与滚动**）
+```
+
+- `_on_canvas_configure`：把 body 的宽度设成"画布宽 − 24"，**横向永不出现滚动条**。
+- `_on_body_configure`：刷新 `scrollregion`。
+- `_sync_scrollbar`：**装得下就把滚动条收起来**，装不下才显示（B站/环境两页就看不到它）。
+
+另外加了一个「收起」按钮，把底部日志折起来给小屏腾地方；日志默认高度从 7 行降到 5 行。
+
+## 63. ⚠️ 坑：Tk 的 `<MouseWheel>` 只发给"指针正底下"的那个控件
+
+在 `Page` 上挂一次是没用的 —— 指针停在某张卡片、某个输入框上时，事件归那个控件，
+`Page` 收不到。所以 `Page.bind_wheel()` **递归遍历整棵控件树**逐个 `bind('<MouseWheel>', …, add='+')`：
+
+```python
+_SELF_SCROLL = (tk.Text, tk.Listbox, ttk.Treeview, ttk.Combobox, ttk.Spinbox)
+# 这几类自己会滚，跳过，别抢它们的滚轮
+```
+
+因为子类是在 `super().__init__()` **之后**才建控件的，`bind_wheel()` 不能在基类里调
+—— 由 `Shell` 建完页面后统一替它们调一次。
+
+## 64. 实测（真窗口，不是单元模拟）
+
+`lang_dev/_demo_scroll.py` 开真窗口、窗口内调用滚轮处理函数，打印 `yview`：
+
+```
+[滚动前]   内容高=812 视口高=367 滚动条可见=True yview=(0.0,   0.455)
+[滚 1 格后] 内容高=812 视口高=367 滚动条可见=True yview=(0.045, 0.5)
+[滚到底后] 内容高=812 视口高=367 滚动条可见=True yview=(0.545, 1.0)
+```
+
+- 内容 812 px、视口 367 px → **超出 445 px**，滚动条自动出现；
+- 滚一格 = `1/22` 内容高 = 0.045（`yview_scroll(1,'units')`）；
+- 滚到底 `yview=(0.545, 1.0)` —— 也就是**一开始有 54.5% 的内容在折叠线下面**，
+  先前就是这部分被切没了。
+
+**截图对照**（`lang_dev/_scroll_before.png` / `_scroll_after.png`，同一窗口）：
+
+| | 看到什么 |
+|---|---|
+| 滚动前 | 网易云音乐 / 账号卡片 / cookie 来源：无 / cookie 输入 / 退出登录 —— **下载区完全看不到** |
+| 滚动后 | 账号卡片滚上去了，**「下载」卡片出现**：音质 320kbps、下载所选、打开输出目录 |
+
+各页内容高度（默认 740 高窗口，视口 459）：转谱 494、网易云 795、B站 326、
+歌词 641、语种 486、环境 352 ⇒ 四页需要滚动，B站/环境两页不需要（滚动条自动隐藏）。
+
+## 65. 验证
+
+| 项 | 结果 |
+|---|---|
+| `lang_dev/_check_newui.py` | **40/40**（新增 §6：Canvas/滚动条/已挂滚轮/日志卡不随滚动；滚轮方向与格数；内容变高后滚动条出现；scrollregion 包住全部内容） |
+| `lang_dev/_selfcheck.py` / `_check_gui.py` | 81/81 / 0 问题 |
+| `lang_dev/_verify_exe.py` | **43/43** —— 内容层新增 3 项：`bind_wheel` / `_build_scroll` / `_sync_scrollbar`（从 exe 的 PYZ 里解出 ui_kit 的 code 核对） |
+| 冻结态 | exe 同样渲染新界面（`lang_dev/_ui_exe_scroll.png`） |
+
+**没做到的**：这个会话里键鼠注入工具要批准、而批准被禁用，所以我**没法真的用滚轮滚一下**。
+替代证据是"真窗口内调用同一个处理函数 + 打印 yview"（§64）以及 exe 里确实编进了这三个符号。
+
+## 66. 出货 exe（本轮）
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 574,363,916 B（547.8 MB） |
+| sha256 | `5FE8D7AAEF4437B6B6CCB26D3727A90C751123E9CE3357FD697AF55C3F15CF5E` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `727BAAB2…`） |
+| 归档校验 | 43 项，0 问题 |
+
+## 67. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `ui_kit.py` | `Page` 内容区改 Canvas 滚动；`bind_wheel` / `_on_wheel` / `_sync_scrollbar` / `_build_scroll`；日志卡加「收起」、默认高度 7→5 行 |
+| `ui_app.py` | `Shell` 建完页面统一 `bind_wheel()`；`CookieBar` 输入框改左对齐定宽（最大化时不再被拉成一整行） |
+| `lang_dev/_check_newui.py` | +9 项滚动断言（含滚轮方向与格数） |
+| `lang_dev/_verify_exe.py` | ui_kit 内容层 3 项 |
+| `lang_dev/_demo_scroll.py` | **新增**：真窗口滚动演示，打印 yview |
+
 

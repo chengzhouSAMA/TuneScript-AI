@@ -85,8 +85,8 @@ class CookieBar:
         g = K.form(parent)
         ttk.Label(g, text='cookie 输入', style='NCard.TLabel').grid(
             row=0, column=0, sticky='w', pady=(4, 0))
-        self.entry = ttk.Entry(g, textvariable=self.var, width=52)
-        self.entry.grid(row=0, column=1, padx=6, pady=(4, 0), sticky='ew')
+        self.entry = ttk.Entry(g, textvariable=self.var, width=56)
+        self.entry.grid(row=0, column=1, padx=6, pady=(4, 0), sticky='w')
         btns = tk.Frame(g, bg=K.N_CARD)
         btns.grid(row=0, column=2, pady=(4, 0))
         ttk.Button(btns, text='保存', style='NSecond.TButton',
@@ -1006,6 +1006,7 @@ class Shell:
             #   会退回创建顺序，显示的不是被选中的那页；而且六页同时建也白费时间。）
             page = cls(self.container, self)
             self.pages[key] = page
+            page.bind_wheel()          # 控件都建完了，这时挂滚轮最省事
             b = tk.Button(self.side, text='  ' + label, anchor='w', bd=0,
                           relief='flat', bg=K.N_SIDEBAR, fg=K.N_SIDEBAR_TEXT,
                           activebackground=K.N_SIDEBAR_HOVER,

@@ -155,12 +155,17 @@ def main():
                  ("_build_accomp", "R2 无人声段伴奏整理"),
                  ("_accomp_legacy", "R2 回退路径（TS_ACCOMP_BOOST=0）"),
                  ("ui_app", "新版多入口 UI（惰性 import，必须在包里）"))
-    n_content = len(WANT_CONST) + len(WANT_MAIN) + 3
+    n_content = 0   # 下面几组内容层检查的总项数，最后汇总用
     # 新版 UI 里的关键件必须真的编译进了 ui_app（模块在 ≠ 内容是新的）
     WANT_UI = (("CookieBar", "cookie 输入栏"),
                ("TS_UI_PAGE", "初始页环境变量"),
                ("TS_UI_GEOMETRY", "窗口位置环境变量"),
                ("_mask", "cookie 脱敏"))
+    # 滚轮滚动也在 ui_kit 里，分开查（模块在 ≠ 内容是新的）
+    WANT_UIKIT = (("bind_wheel", "给控件挂滚轮"),
+                  ("_build_scroll", "内容区做成可滚动"),
+                  ("_sync_scrollbar", "滚动条按需显示"))
+    n_content = len(WANT_CONST) + len(WANT_MAIN) + len(WANT_UI) + len(WANT_UIKIT)
     if pyz_name is None:
         bad += n_content
     else:
@@ -197,6 +202,17 @@ def main():
                 print("  ui_app 常量/名字数：%d" % len(ustrs))
                 for want, what in WANT_UI:
                     ok = any(want in s for s in ustrs)
+                    bad += (0 if ok else 1)
+                    print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
+            kit = _code_of("ui_kit")
+            if kit is None:
+                print("  ! PYZ 里没找到 ui_kit")
+                bad += len(WANT_UIKIT)
+            else:
+                kstrs = _collect_strings(kit)
+                print("  ui_kit 常量/名字数：%d" % len(kstrs))
+                for want, what in WANT_UIKIT:
+                    ok = any(want in s for s in kstrs)
                     bad += (0 if ok else 1)
                     print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
             # 烤入的 cookie 模块：出货 exe 不该有，除非 TS_EXPECT_BAKED=1 明确要求
