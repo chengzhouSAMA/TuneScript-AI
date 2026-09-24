@@ -156,6 +156,10 @@ def main():
                  ("_hand_gap_min", "R1 间隔度量"),
                  ("_build_accomp", "R2 无人声段伴奏整理"),
                  ("_accomp_legacy", "R2 回退路径（TS_ACCOMP_BOOST=0）"),
+                 ("_fill_hand_gaps", "间奏补音：分轨素材填进某只手的空档"),
+                 ("_gap_notes", "间奏补音的素材来源（other 轨单独识别）"),
+                 ("TS_GAP_FILL_WIN", "间奏补右手的代理判定容差（默认 0 = 不判）"),
+                 ("_rpass", "间奏补右手的取舍分支"),
                  ("ui_app", "新版多入口 UI（惰性 import，必须在包里）"))
     n_content = 0   # 下面几组内容层检查的总项数，最后汇总用
     # 新版 UI 里的关键件必须真的编译进了 ui_app（模块在 ≠ 内容是新的）

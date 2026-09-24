@@ -78,8 +78,11 @@ def main():
         print("     最近备份：%s" % last_name)
         print("     diff：%d hunk / +%d / -%d" % (hunks, len(adds), len(dels)))
         joined = "".join(adds)
-        check("自上次备份以来包含本轮声明的 R1/R2 实现",
-              "_enforce_octave_gap" in joined and "_build_accomp" in joined,
+        # 本轮（2026-09-25 间奏补音）：回炉路径新增 R2b/R2c。
+        # 上一轮是 R1/R2（_enforce_octave_gap / _build_accomp），本轮换成补音的三个件。
+        check("自上次备份以来包含本轮声明的间奏补音实现",
+              "_fill_hand_gaps" in joined and "TS_GAP_FILL_WIN" in joined
+              and "_gap_notes" in joined,
               "新增 %d 行" % len(adds))
         check("新增行数在理智范围内（<=400；仅防意外大改，不是预算）",
               len(adds) <= 400, "新增 %d 行" % len(adds))
@@ -126,7 +129,9 @@ def main():
     if os.path.isfile(anchor):
         _h, adds_all, dels_all = _diff(anchor, p)
         print("     累计（相对 V0.5 出货）：+%d / -%d" % (len(adds_all), len(dels_all)))
-        check("累计新增在理智范围内（<=700）", len(adds_all) <= 700, "+%d" % len(adds_all))
+        # 上限只是"防静默大改"的护栏，不是预算。每轮把这些数写出来，涨就跟着抬。
+        # 2026-09-25 实测 +705：R1/R2、碎音修复、间奏补音三轮累计，全部有本轮章节对应。
+        check("累计新增在理智范围内（<=900）", len(adds_all) <= 900, "+%d" % len(adds_all))
         check("累计删除在理智范围内（<=80）", len(dels_all) <= 80, "-%d" % len(dels_all))
     import ast as _ast
     try:

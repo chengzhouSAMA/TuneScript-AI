@@ -1979,6 +1979,63 @@ def _fill_right_hand(right, mix_notes, vline, split_pitch=60, min_len=0.06,
     return out, st
 
 
+def _fill_hand_gaps(hand, extra_notes, min_hole=0.5, max_per_sec=3.0,
+                    min_len=0.06, pitch_lo=-1, pitch_hi=128, vel_floor=55):
+    """某只手的空洞里，用「分轨单独识别出来的伴奏」补音。
+
+    为什么需要它：**回炉会把整条分轨路径的结果整个丢掉**，改用「整曲混音按音高切手」。
+    而电子编曲的 drop 上 Basic Pitch 对整曲混音几乎无能为力 —— 实测 inhuman
+    45.7~60.8 s（该段原曲 −5.38 dBFS，是全曲**最响**的地方）：
+    整曲混音只识别出 15 个音、产物里左手剩 9 个右手剩 8 个（覆盖 16% / 7.6%）；
+    而 `other` 轨单独识别有 **92 个音，其中 90 个 ≥60 —— 全在右手音区**。
+    素材明明认出来了，却被回炉扔掉。
+
+    `pitch_lo/pitch_hi` 决定补哪只手（左手 `-1..60`，右手 `60..128`）。
+    纪律与 t11 一致：**只加不改** —— 已有音符一个不删、不动、不改时值。
+    返回 (新的手, 统计)。
+
+    边界：空档是用这只手自己的起止算出来的，所以只手尾之后永远不算空档
+    （`t_end` 就是该手最后一个音的结束时刻）。实测 inhuman4 素材 199.6s，
+    左手最后音在 196.8s、右手在 196.2s，尾部只剩 2.9s/3.5s 的正常收尾。
+    密度上限 `max_per_sec` 是"每个新音与前一个被采纳音至少隔 1/rate 秒"。
+    """
+    st = {'added': 0, 'holes': 0, 'hole_sec': 0.0}
+    if not hand or not extra_notes:
+        return hand, st
+    t_end = max(e for _s, e, _p, _v in hand)
+    holes = []
+    cur = 0.0
+    for s, e in sorted((s, e) for s, e, _p, _v in hand):
+        if s - cur >= min_hole:
+            holes.append((cur, s))
+        cur = max(cur, e)
+    if t_end - cur >= min_hole:
+        holes.append((cur, t_end))
+    if not holes:
+        return hand, st
+    st['holes'] = len(holes)
+    st['hole_sec'] = round(sum(b - a for a, b in holes), 1)
+    gap_sec = 1.0 / max(1e-6, max_per_sec)
+    out = list(hand)
+    for a, b in holes:
+        cand = sorted((n for n in extra_notes
+                       if a <= n[0] < b and pitch_lo <= n[2] < pitch_hi
+                       and (n[1] - n[0]) >= min_len), key=lambda n: n[0])
+        last = -9.9
+        seen_p = set()
+        for s, e, p, v in cand:
+            if s - last < gap_sec:
+                continue
+            if p in seen_p:              # 同一处空洞里同音高别重复触发（碎/抖）
+                continue
+            out.append((s, e, p, max(int(v), vel_floor)))
+            seen_p.add(p)
+            last = s
+            st['added'] += 1
+    out.sort(key=lambda n: (n[0], n[2]))
+    return out, st
+
+
 def _graft_vocal_melody(right, vline, min_len=0.08, pad=0.12, max_per_sec=3.0,
                         min_pitch=45):
     """把人声轨旋律「补」进右手：只在右手该时刻完全没音时补。
@@ -3120,6 +3177,45 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                 _cost0, sim = _cost2, _sim2
                 progress(f'回炉成功：DTW 成本降到 {_cost0:.3f}(相似度 {sim:.2f})，采用新结果。')
 
+                # ---- R2b：回炉把整条分轨素材丢掉了，这里补回来 ----
+                # 回炉结果 = 整曲混音按音高切手，而 Basic Pitch 在电子 drop 上几乎
+                # 识别不出东西。实测 inhuman 45.7~60.8 s（该段原曲 −5.38 dBFS，是全曲
+                # **最响**的地方）：整曲混音只有 15 个音，产物里 L 剩 9 个 / R 剩 8 个、
+                # 覆盖 16% / 7.6%；而 `other` 轨单独识别有 **92 个音、其中 90 个 ≥60
+                # （右手音区）**。素材本来认出来了，不该被扔掉。
+                # ① 左手空档用分轨伴奏补；② 分轨伴奏并进 t11 的候选池（RULE_B 吃的
+                # 就是整曲混音，那儿没米下锅）。两处都"只加不改"（`_fill_hand_gaps`
+                # 与 `_fill_right_hand` 都只往手里追加），最后照 t11 的办法一起渲染复核、
+                # 超差回滚。
+                # ⚠️ 但 ② 的**产物不是超集**：规则 B 先按「每 0.10s 取最高音」把候选压成
+                #    单音线、再按 instr_rate 限速接受，接受是**竞争性**的 —— 同一组里塞进
+                #    一个更高的 other 轨音，就会把原来那个"中低音区升八度搬上来"的混音音
+                #    顶掉。实测 shiki 冻结分轨（TS_GAP_FILL=0 vs 1）：左手逐字节不变，
+                #    右手去掉 15 个 61~67 的音、补上 22 个 65~86 的音。
+                #    机制与单测见 `_test_handgap_accomp.py` 第 11 节。
+                _gap_notes = None
+                if os.environ.get('TS_GAP_FILL', '1') == '1' and stems:
+                    try:
+                        _lp = stems.get('other')
+                        if _lp and os.path.isfile(_lp):
+                            _an = transcribe_notes(_lp, _m2, progress,
+                                                   label='电子伴奏(补间奏)', min_len=60)
+                            _lf, _lfst = _fill_hand_gaps(
+                                left, _an, pitch_lo=-1, pitch_hi=60,
+                                max_per_sec=float(os.environ.get('TS_GAP_FILL_RATE', '3.0')),
+                                min_hole=float(os.environ.get('TS_GAP_FILL_HOLE', '0.5')))
+                            if _lfst['added']:
+                                left = _lf
+                                progress('间奏补左手：%d 个音填进 %d 处空档（共 %ss）。'
+                                         % (_lfst['added'], _lfst['holes'],
+                                            _lfst['hole_sec']))
+                            _gap_notes = _an
+                            _notes2 = _notes2 + _an
+                            progress('间奏补音：分轨伴奏 %d 个音并入右手候选池'
+                                     '（原混音候选 %d 个）。' % (len(_an), len(_notes2) - len(_an)))
+                    except Exception as _e6:
+                        progress('间奏补音不可用(%s)，保留原结果。' % type(_e6).__name__)
+
                 # ---- t6(2026-09-20)：出厂产物的人声连续性补救 ----
                 # 回炉结果 = 全曲混音按音高切手，低音区人声会被判给左手、人声不在最高音线
                 # 时整段被伴奏顶掉 → 出厂出现数秒级旋律空洞（monitoring 任一手覆盖仅
@@ -3260,6 +3356,77 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                             progress('右手补音：无需补（%s）' % _fst)
                     except Exception as _e4:
                         progress(f'右手补音不可用({type(_e4).__name__})，保留原结果。')
+
+                # ---- R2c：无人声段右手补音（t11 的判据会挡住这一类改动）----
+                # t11 的取舍用 `TS_FILL_WIN=0.008`。R2c 一开始也照抄了"用 DTW/chroma
+                # 代理卡一道"的做法（窗口 0.03），但**实测证明这个代理判不了这件事** ——
+                # 同一首 inhuman、同一份冻结分轨，代理对补音的反应**非单调**：
+                #
+                #   补音数  空档              代理成本
+                #     ——    ——（空着）        0.140  ← 回炉基线
+                #    128   36 处 / 82.5s      0.175  (+0.035)
+                #    198   61 处 / 89.9s      0.154  (+0.014)  ← 灌爆反而"更好"
+                #
+                # 灌爆 198 个音（`TS_GAP_FILL_RATE=30`、`TS_GAP_FILL_HOLE=0.2`）比正常的
+                # 128 个音**得分更高**，所以拿它当判据只会让"间奏补没补上"随机化 ——
+                # 同一首歌实测在两次独立运行里一次采用、一次回滚。
+                # ⇒ 默认**不用代理判定**（`TS_GAP_FILL_WIN=0`）：补音只落在真空档里、
+                #    素材来自本曲分轨的识别结果、密度有上限、同音高不许重叠，这些结构性
+                #    约束已经足够。想回到"保守卡一道"设 `TS_GAP_FILL_WIN=0.05`。
+                # 代价要说清：代理成本会上升、`sim` 会下降（实测 0.8708→0.8395），
+                # 那是"空着更贴合混音 chroma"造成的，不是产物变差。
+                if os.environ.get('TS_GAP_FILL', '1') == '1' and _gap_notes:
+                    try:
+                        _rf, _rfst = _fill_hand_gaps(
+                            right, _gap_notes, pitch_lo=60, pitch_hi=128,
+                            max_per_sec=float(os.environ.get('TS_GAP_FILL_RATE', '3.0')),
+                            min_hole=float(os.environ.get('TS_GAP_FILL_HOLE', '0.5')),
+                            min_len=0.06, vel_floor=60)
+                        if _rfst['added'] > 0:
+                            _rmidi = _build_hands_midi(left, _rf)
+                            _rmidi.write(midi_path)
+                            write_grand_staff_xml(left, _rf, xml_path, bpm=tempo,
+                                                  n_bars=_nb2, splice=splice)
+                            _rpdf = render_score_pdf(ms_exe, xml_path, pdf_path, left, _rf,
+                                                     tempo, base, out_dir, progress,
+                                                     n_bars=_nb2, splice=splice)
+                            render_wav(ms_exe, midi_path, out_wav, progress)
+                            _rk = _melody_similarity(decoded, out_wav)
+                            _rcost = _rk[0] if _rk else None
+                            # `TS_GAP_FILL_WIN > 0` 时才启用代理判定（默认 0 = 不判，
+                            # 理由见本段开头那张实测表）。判定开着时仍旧超差回滚。
+                            _rwin = float(os.environ.get('TS_GAP_FILL_WIN', '0'))
+                            _rpass = (_rwin <= 0 or _rcost is None
+                                      or _rcost <= _cost0 + _rwin)
+                            if _rpass:
+                                right = _rf
+                                pdf_paths = _rpdf
+                                if _rk:
+                                    sim = _rk[1]
+                                progress('间奏补右手：%d 个音填进 %d 处空档（共 %ss），'
+                                         'DTW 成本 %s%s，已采用。'
+                                         % (_rfst['added'], _rfst['holes'],
+                                            _rfst['hole_sec'],
+                                            ('%.3f→%.3f' % (_cost0, _rcost))
+                                            if _rcost is not None else '未测',
+                                            '' if _rwin <= 0
+                                            else '（容差 %.3f）' % _rwin))
+                            else:
+                                _rrm = _build_hands_midi(left, right)
+                                _rrm.write(midi_path)
+                                write_grand_staff_xml(left, right, xml_path, bpm=tempo,
+                                                      n_bars=_nb2, splice=splice)
+                                pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path,
+                                                             left, right, tempo, base,
+                                                             out_dir, progress,
+                                                             n_bars=_nb2, splice=splice)
+                                render_wav(ms_exe, midi_path, out_wav, progress)
+                                progress('间奏补右手使相似度变差(%.3f>%.3f)，已回滚。'
+                                         % (_rcost, _cost0 + _rwin))
+                        else:
+                            progress('间奏补右手：右手没有足够长的空档，跳过。')
+                    except Exception as _e7:
+                        progress('间奏补右手不可用(%s)，保留原结果。' % type(_e7).__name__)
             else:
                 # 回炉更差 —— 把产物改回原来的
                 _restore = _build_hands_midi(left, right)

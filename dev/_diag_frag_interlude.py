@@ -22,16 +22,39 @@ VOCAL = {
 
 
 def vocal_regions(out_dir):
-    """从**人声轨音频**判「有没有人在唱」：返回 (有人声区间, 无人声区间)。"""
+    """从**人声轨音频**判「有没有人在唱」：返回 (有人声区间, 无人声区间)。
+
+    人声轨优先在 out_dir 里找（整条管线会把六轨写在产物目录），
+    找不到再退回 `回归验收/_stems/<key>/`。
+    """
     import numpy as np
     import soundfile as sf
-    key = os.path.basename(out_dir.rstrip('/\\')).split('_')[0]
-    src = os.path.join(ROOT, '回归验收', '_stems', key)
     voc = None
-    if os.path.isdir(src):
-        for f in os.listdir(src):
+    if os.path.isdir(out_dir):
+        for f in sorted(os.listdir(out_dir)):
             if f.endswith('_vocals.wav'):
-                voc = os.path.join(src, f)
+                voc = os.path.join(out_dir, f)
+                break
+    if not voc:
+        key = os.path.basename(out_dir.rstrip('/\\'))
+        # 产物目录常带臂/变体后缀（`inhuman_B_ihnew`、`shiki_A`），
+        # 剥掉它们才是 stem 的 key（`inhuman` / `shiki`）。
+        cands = [key]
+        for sep in ('_B_', '_A_', '_B', '_A'):
+            if sep in key:
+                cands.append(key.split(sep)[0])
+        for d in ('_stems', '_work'):
+            for k in cands:
+                src = os.path.join(ROOT, '回归验收', d, k)
+                if not os.path.isdir(src):
+                    continue
+                for f in os.listdir(src):
+                    if f.endswith('_vocals.wav'):
+                        voc = os.path.join(src, f)
+                        break
+                if voc:
+                    break
+            if voc:
                 break
     if not voc or not os.path.isfile(voc):
         return None, None

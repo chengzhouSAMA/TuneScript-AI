@@ -166,6 +166,109 @@ z = T._build_accomp(other, in_gap, gaps, min_gap=0.8, halluc=True)
 check('关闭 R2 后 == 旧路径', z == legacy)
 del os.environ['TS_ACCOMP_BOOST']
 
+print('\n=== 10) _fill_hand_gaps：拿分轨素材补某只手的空档 ===')
+# 纪律：**只加不改** —— 已有音符一个不删、不动、不改时值。
+base = [(0.0, 1.0, 60, 80), (3.0, 4.0, 62, 80)]
+extra2 = [(1.2, 1.5, 48, 90), (1.7, 1.9, 50, 40)]
+
+f1, s1 = T._fill_hand_gaps(list(base), list(extra2))
+check('识别出 1 处空档', s1['holes'] == 1, 'holes=%s' % s1['holes'])
+check('空档长度 2.0s', s1['hole_sec'] == 2.0, 'hole_sec=%s' % s1['hole_sec'])
+check('2 个音补进去', s1['added'] == 2, 'added=%s' % s1['added'])
+check('原有音符原样保留', all(n in f1 for n in base))
+check('总数 = 原 2 + 新 2', len(f1) == 4, 'len=%d' % len(f1))
+check('结果按起音排序', f1 == sorted(f1, key=lambda n: (n[0], n[2])))
+check('力度不低于地板 55', [n[3] for n in f1 if n[0] == 1.7] == [55],
+      'v=%s' % [n[3] for n in f1 if n[0] == 1.7])
+check('够响的力度不被改动', [n[3] for n in f1 if n[0] == 1.2] == [90])
+
+# 空输入：一律原样返回
+z1, z1s = T._fill_hand_gaps([], list(extra2))
+check('手为空 → 原样返回', z1 == [] and z1s['added'] == 0)
+z2, z2s = T._fill_hand_gaps(list(base), [])
+check('素材为空 → 原样返回', z2 == base and z2s['added'] == 0)
+
+# 音域边界：pitch_hi 是**开区间**（60 属于右手，不能补给左手）
+f2, s2 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (3.0, 4.0, 60, 80)],
+                           [(1.2, 1.5, 59, 80), (1.7, 2.0, 60, 80)],
+                           pitch_lo=-1, pitch_hi=60)
+check('59 补进左手 / 60 不补', s2['added'] == 1, 'added=%s' % s2['added'])
+f3, s3 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (3.0, 4.0, 60, 80)],
+                           [(1.2, 1.5, 59, 80), (1.7, 2.0, 60, 80)],
+                           pitch_lo=60, pitch_hi=128)
+check('同一素材右手只收 60', s3['added'] == 1 and
+      any(n[2] == 60 for n in f3), 'added=%s' % s3['added'])
+
+# 空档外的素材一律不许进来（补音不能越界扩到已占用的时刻）
+f4, s4 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (3.0, 4.0, 60, 80)],
+                           [(0.2, 0.5, 48, 80), (2.2, 2.5, 48, 80), (5.0, 5.5, 48, 80)])
+check('只有空档内那个被采用', s4['added'] == 1, 'added=%s' % s4['added'])
+check('采用的是空档内的音', any(abs(n[0] - 2.2) < 1e-9 for n in f4))
+
+# 太短的素材丢弃（min_len）
+f5, s5 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (3.0, 4.0, 60, 80)],
+                           [(1.2, 1.23, 48, 80), (1.6, 1.9, 48, 80)], min_len=0.06)
+check('0.03s 的丢弃 / 0.3s 的保留', s5['added'] == 1, 'added=%s' % s5['added'])
+
+# 密度上限：max_per_sec=3 → 同音高之间至少 1/3 秒。
+# 三个音彼此相隔 0.1s，只有第一个能进。
+f6, s6 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (3.0, 4.0, 60, 80)],
+                           [(1.2, 1.5, 48, 80), (1.3, 1.6, 50, 80), (1.4, 1.7, 52, 80)],
+                           max_per_sec=3.0)
+check('3 个/秒上限只放行 1 个', s6['added'] == 1, 'added=%s' % s6['added'])
+# 放宽到 10 个/秒 → 三个都进
+# 注：间隔恰好等于 1/rate 时会被浮点误差挡掉（1.3−1.2 = 0.09999999999999987），
+# 所以这里用 0.15s 间隔；生产里 rate=3.0（间隔 0.333s）碰不到这个边界。
+f7, s7 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (3.0, 4.0, 60, 80)],
+                           [(1.2, 1.5, 48, 80), (1.35, 1.65, 50, 80), (1.5, 1.8, 52, 80)],
+                           max_per_sec=10.0)
+check('放宽后 3 个都进', s7['added'] == 3, 'added=%s' % s7['added'])
+
+# 同一处空档里同音高只触发一次（防碎/防抖）
+f8, s8 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (5.0, 6.0, 60, 80)],
+                           [(1.0, 1.4, 48, 80), (2.0, 2.4, 48, 80), (3.0, 3.4, 50, 80)],
+                           max_per_sec=10.0)
+check('同音高在一处空档里只留一次', s8['added'] == 2, 'added=%s' % s8['added'])
+
+# 空档太短不补（min_hole）
+f9, s9 = T._fill_hand_gaps([(0.0, 1.0, 60, 80), (1.3, 2.0, 60, 80)],
+                           [(1.05, 1.25, 48, 80)], min_hole=0.5)
+check('0.3s 的空档不动', s9['added'] == 0 and s9['holes'] == 0)
+
+# 已知边界：**只手尾之后的素材永远补不进来**。空档是用该手自己的起止算出来的，
+# t_end 就是这只手最后一个音的结束时刻，所以"尾部空档"长度恒为 0。
+# 实测（inhuman4，素材总长 199.6s）：左手最后音 196.8s、右手 196.2s，
+# 尾部空档 2.9s / 3.5s —— 只是正常收尾，没有补的必要，故保持现状。
+f10, s10 = T._fill_hand_gaps([(0.0, 0.5, 60, 80)],
+                             [(i * 0.5, i * 0.5 + 0.4, 48 + (i % 5), 80) for i in range(10)])
+check('手尾之后的素材不补（尾部空档恒为 0）', s10['added'] == 0 and s10['holes'] == 0)
+# 内部空档照常补
+f11, s11 = T._fill_hand_gaps([(0.0, 0.5, 60, 80), (4.0, 4.5, 60, 80)],
+                             [(i * 0.5, i * 0.5 + 0.4, 48 + (i % 5), 80) for i in range(10)])
+check('内部空档正常补', s11['added'] >= 1, 'added=%s' % s11['added'])
+check('补进来的都在空档 (0.5, 4.0) 内',
+      all(0.5 <= n[0] < 4.0 for n in f11 if n[2] != 60))
+
+print('\n=== 11) ⚠️ 往 t11 候选池里加料，结果**不是**超集 ===')
+# 实测（shiki 冻结分轨，gf0 vs gf1）：左手逐字节不变，右手却有 15 个 gf0 的音
+# 在 gf1 里没了、另多了 22 个。原因不是"删音"，而是 t11 的接受是**竞争性**的：
+# 规则 B 先按「每 0.10s 取最高音」把候选压成单音线，再按 instr_rate 限速接受。
+# 同一组里塞进一个更高的 other 轨音，就会把原来那个低音代表**顶掉**——
+# 于是产物里看到"少一个 61~67 的音、多一个 65~86 的音"。
+# 被顶掉的正是"中低音区升八度搬上来的混音音"，顶上来的才是 other 轨真正的高音。
+_mixA = [(1.00, 1.30, 52, 80)]                       # 52 → 升八度成 64
+_mixB = _mixA + [(1.05, 1.35, 81, 80)]               # 同组里多一个 other 轨的高音
+_rA, _sA = T._fill_right_hand([], list(_mixA), [])
+_rB, _sB = T._fill_right_hand([], list(_mixB), [])
+check('单独混音时取升八度后的 64', [n[2] for n in _rA] == [64],
+      'p=%s' % [n[2] for n in _rA])
+check('加一个高音后改取 81（同组最高）', [n[2] for n in _rB] == [81],
+      'p=%s' % [n[2] for n in _rB])
+check('所以产物不是超集（旧音被顶掉，不是被删）',
+      not set(n[2] for n in _rA) <= set(n[2] for n in _rB))
+check('两边都只产出 1 个音（限速与取最高音没变）',
+      len(_rA) == 1 and len(_rB) == 1)
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:
