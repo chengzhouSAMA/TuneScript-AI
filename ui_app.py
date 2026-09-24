@@ -453,10 +453,13 @@ class TranscribePage(Page):
             messagebox.showerror('错误', '未找到 MuseScore4.exe，请先安装 MuseScore 4。')
             return
         self.open_btn.configure(state='disabled')
-        self.run(lambda p: self._work(audio, bvid, query, outdir, p),
+        # ⚠️ 选项必须在**主线程**里先读出来。`_work` 跑在工作线程，
+        #    在那里碰 Tk 变量会抛 `RuntimeError: main thread is not in main loop`。
+        opts = (self.sep_var.get(), self.simple_var.get(), self.mt3_var.get())
+        self.run(lambda p: self._work(audio, bvid, query, outdir, opts, p),
                  self._done, '正在转谱…')
 
-    def _work(self, audio, bvid, query, outdir, progress):
+    def _work(self, audio, bvid, query, outdir, opts, progress):
         from transcriber_app import run_pipeline
         if not audio and bvid:
             from bilibili import fetch_audio
@@ -476,9 +479,8 @@ class TranscribePage(Page):
             progress('已下载：%s' % audio)
         return run_pipeline(audio, outdir, self.app.model_path, self.app.ms_exe,
                             self.app.ffmpeg, progress,
-                            use_separation=self.sep_var.get(),
-                            simple_mode=self.simple_var.get(),
-                            use_mt3=self.mt3_var.get())
+                            use_separation=opts[0], simple_mode=opts[1],
+                            use_mt3=opts[2])
 
     def _done(self, r):
         pdfs = r.get('pdf') or []

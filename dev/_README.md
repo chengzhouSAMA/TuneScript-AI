@@ -1850,4 +1850,112 @@ quality_hint   → 旧: "已登录 承州SAMA（未知）：可尝试无损"
 | `lang_dev/_check_newui.py` | §7 换成主人的真实数据，共 9 项 |
 | `lang_dev/_selfcheck.py` | 新增 6 项 vipType 标签检查 |
 
+---
+---
+
+# 第十五部分：转谱一点就报 `TypeError: <lambda>() takes 1 positional argument but 5 were given`
+
+> 主人原话：**「TypeError: <lambda>() takes 1 positional argument but 5 were given
+> 转谱时报错」**。
+
+## 91. 先复现：**CLI 复现不出来，必须跑真实 GUI 路径**
+
+我先把 CLI 的四种组合全跑了一遍（简洁 / 分轨 / `--mt3` / 回炉），**全部正常** ——
+说明这条路上没有 5 个参数的调用。于是写了
+`lang_dev/_probe_gui_transcribe.py`：直接 `Tk()` + `Shell()` + 点 `TranscribePage._start()`，
+把弹窗换成记录后再驱动事件循环。**一次就复现**：
+
+```
+File "ui_kit.py", line 386, in _thread
+    res = work(lambda m: self.q.put(('log', m)))
+File "ui_app.py", line 456, in <lambda>
+    self.run(lambda p: self._work(audio, bvid, query, outdir, p),
+TypeError: <lambda>() takes 1 positional argument but 5 were given
+```
+
+## 92. 根因：`Page.run` 里 `self._work = work` 把子类的 `_work` **方法**盖掉了
+
+`ui_kit.Page.run()` 原来有这么一行"保存一下"：
+
+```python
+self._on_done = on_done
+self._work = work          # ← 就是它
+```
+
+而 `TranscribePage` / `BilibiliPage` / `LyricsPage` / `LangIdPage` **各自都有 `_work()` 方法**。
+于是执行顺序变成：
+
+1. `self.run(lambda p: self._work(a, b, c, d, p), …)` —— 外观上没问题；
+2. `run()` 把 `self._work` **赋成那个 1 参数的 lambda**（方法被实例属性盖住）；
+3. 工作线程里 lambda 执行 `self._work(audio, bvid, query, outdir, p)` ——
+   此时 `self._work` **已经是它自己**，等于拿 **5 个参数**去调一个 **1 参数**的 lambda
+   ⇒ `TypeError: <lambda>() takes 1 positional argument but 5 were given`。
+
+**为什么只有网易云页是好的**：它用的是 `_do_search` / `_do_download`，没和 `_work` 撞名
+—— 这也正好解释了主人"网易云下载正常、转谱一点就炸"的现象。
+
+## 93. 改法（顺带修掉另外两个真问题）
+
+### 93.1 内部属性一律加 `_task_` 前缀
+
+`self._work = work` 这行本来就是**死代码**（从没被读过），直接删掉；
+`self._on_done` 改名 `self._task_done`。类里写了注释说明为什么不能用 `_work`/`_done`
+这种通用名。
+
+### 93.2 `_work` 里读 Tk 变量 → `RuntimeError: main thread is not in main loop`
+
+修完上面那条，日志里立刻冒出第二个错：`_work` 跑在工作线程，却在里面调
+`self.sep_var.get()` / `self.simple_var.get()` / `self.mt3_var.get()`。
+**Tk 变量只能主线程碰**。改成在 `_start()`（主线程）里先读成 `opts` 元组再传进去。
+（其余页面本来就是先算好再传参，没有这个问题。）
+
+### 93.3 报错只给一行字 → 必须带调用栈
+
+`Page.run` 的异常处理原来写的是 `'%s: %s' % (type(e).__name__, e)` ——
+主人拿到的就真的只有那一行，**连哪个文件哪一行都不知道**。
+现在带上最后 6 帧 traceback（`ui_kit` 里留了注释说明为什么）。
+
+## 94. 验证
+
+| 项 | 结果 |
+|---|---|
+| `lang_dev/_probe_gui_transcribe.py`（真实 GUI 路径） | **修前：一次复现**；修后：跑到 `✅ 完成。`，PDF/MIDI/WAV + 六条分离音轨齐全，`showerror` 为空 |
+| `lang_dev/_check_newui.py` | **54/54**（新增 §8 共 5 项，含"任务真的被执行""跑完后 `_work` 还是那个 6 参函数") |
+| `lang_dev/_selfcheck.py` / `_check_gui.py` | 99/99 / 0 问题 |
+
+**回归测试做了反向验证**：临时把 `self._work = work` 放回去，
+`_check_newui.py` 立刻红 3 项（`后台任务真的被执行  → []`）—— 说明这条测试真的抓得住，
+不是摆着好看的。
+
+## 95. ⚠️ 顺便交代一次事故（我自己搞的）
+
+为了做上面那次"放回 bug"的反向验证，我用 `Set-Content -Encoding UTF8` 改写 `ui_kit.py`，
+**这个环境下的 PowerShell 会给文件加 UTF-8 BOM**，于是 Python 报
+`SyntaxError: invalid non-printable character U+FEFF`。
+已经用 `[System.IO.File]::WriteAllBytes` 把 BOM 剥掉并确认 `ui_kit.py` 447 行内容完整。
+教训：**在这个环境里改 `.py` 一律用 `edit` 工具或 .NET 字节写**，别用 `Set-Content`。
+
+## 96. 出货 exe
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 547.8 MB |
+| sha256 | `979FB2BDEC6030A937C1CBC1C8A86D4F0239BFBB36B562A471109F88DD94D970` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `8179E8E8…`） |
+| 归档校验 | 45 项，0 问题 |
+
+冻结态复核（从 exe 的 PYZ 里解出 `ui_kit`/`ui_app` 的 code 核对）：
+有 `_task_done`、没有 `_on_done`、有 `format_exc`、`ui_app` 有 `opts` 版 `_work`。
+`dist/netease_cookie.txt` 没被动。
+
+## 97. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `ui_kit.py` | 删掉 `self._work = work`；`_on_done` → `_task_done`；错误带上 traceback；加防撞名注释 |
+| `ui_app.py` | 转谱页在主线程先读出 `opts` 再交给工作线程 |
+| `lang_dev/_probe_gui_transcribe.py` | **新增**：跑真实 GUI 代码路径的复现/验收脚本 |
+| `lang_dev/_check_newui.py` | 新增 §8 共 5 项防回归断言 |
+
 

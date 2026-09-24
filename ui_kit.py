@@ -372,21 +372,31 @@ class Page(tk.Frame):
         return out
 
     # ---- 后台任务 ----
+    # ⚠️ 内部状态一律用 `_task_` 前缀，**绝不能**用 `_work` / `_done` 这类通用名：
+    #    `Page.run` 曾经写过 `self._work = work`，而子类（TranscribePage / BilibiliPage /
+    #    LyricsPage / LangIdPage）自己都有 `_work()` 方法 —— 于是方法被那个 lambda
+    #    盖掉，线程里再调 `self._work(a, b, c, d, p)` 就变成拿 5 个参数去调 1 参数的
+    #    lambda，报 `TypeError: <lambda>() takes 1 positional argument but 5 were given`。
+    #    （网易云页用的是 `_do_search`/`_do_download`，恰好没撞名，所以只有它没事。）
     def run(self, work, on_done=None, busy_msg='处理中…'):
         if self.busy:
             messagebox.showinfo('请稍候', '当前任务还没结束。')
             return
         self.set_busy(True)
         self.set_status(busy_msg)
-        self._on_done = on_done
-        self._work = work
+        self._task_done = on_done
 
         def _thread():
             try:
                 res = work(lambda m: self.q.put(('log', m)))
                 self.q.put(('done', res))
             except Exception as e:
-                self.q.put(('error', '%s: %s' % (type(e).__name__, e)))
+                # ⚠️ 一定要带上调用栈：只报 "TypeError: xxx" 一行的话，
+                #    用户（和我）根本看不出是**哪一行**炸的，等于白报。
+                import traceback
+                tb = traceback.format_exc().strip().splitlines()
+                tail = '\n'.join(tb[-6:])
+                self.q.put(('error', '%s: %s\n\n%s' % (type(e).__name__, e, tail)))
 
         threading.Thread(target=_thread, daemon=True).start()
 
@@ -420,8 +430,8 @@ class Page(tk.Frame):
                 elif kind == 'done':
                     self.set_busy(False)
                     self.set_status('完成。')
-                    cb = getattr(self, '_on_done', None)
-                    self._on_done = None
+                    cb = getattr(self, '_task_done', None)
+                    self._task_done = None
                     if cb:
                         try:
                             cb(payload)

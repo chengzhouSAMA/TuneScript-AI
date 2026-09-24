@@ -188,6 +188,42 @@ def main():
                                               'fmt': 'mp3'},
                'cookie': {'ok': False, 'reason': 'cookie 无效或已过期'}})))
 
+    print('\n=== 8) 后台任务不能被同名属性盖掉（转谱就炸在这）===')
+    import inspect
+    import time as _time
+    run_src = inspect.getsource(K.Page.run)
+    check('Page.run 不再写 self._work（会盖掉子类 _work 方法）',
+          'self._work' not in run_src)
+    check('Page.run 的内部状态用 _task_ 前缀', 'self._task_done' in run_src)
+    wk_src = inspect.getsource(ui_app.TranscribePage._work)
+    check('_work 里不碰 Tk 变量（它在工作线程跑）',
+          not any(v in wk_src for v in ('sep_var', 'simple_var', 'mt3_var')),
+          'sep_var/simple_var/mt3_var 必须先在主线程读出来')
+
+    # 真跑一遍：任务必须被执行到，且子类方法还在
+    pg3 = shell.pages['transcribe']
+    seen = []
+    orig_work = pg3._work
+
+    def _fake_work(a, b, c, d, opts, p):
+        seen.append((a, b, c, d, opts))
+        return 'ok'
+
+    pg3._work = _fake_work
+    try:
+        pg3.run(lambda p: pg3._work('A', 'B', 'C', 'D', ('x',), p), None)
+        for _i in range(100):
+            root.update()
+            _time.sleep(0.03)
+            if not pg3.busy:
+                break
+        check('后台任务真的被执行（说明 _work 没被换成 1 参数的 lambda）',
+              seen == [('A', 'B', 'C', 'D', ('x',))], str(seen))
+        check('跑完后子类 _work 方法仍然是那个 6 参函数',
+              pg3._work is _fake_work)
+    finally:
+        pg3._work = orig_work
+
     if '--shot' in sys.argv:
         root.deiconify()
         shell.show('netease')
