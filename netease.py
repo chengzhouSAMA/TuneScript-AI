@@ -145,11 +145,18 @@ def eapi_params(url_path, payload):
 # --------------------------------------------------------------------------
 # 取直链
 # --------------------------------------------------------------------------
-def _probe_plain(song_id, br):
-    """明文接口 api/song/enhance/player/url —— 简单、无需加密，优先试它。"""
+def _probe_plain(song_id, br, cookie=None):
+    """明文接口 api/song/enhance/player/url —— 简单、无需加密。
+
+    ⚠️ **必须带 cookie**：不带的话服务端一律按未登录处理，黑胶会员也只会拿到 320k。
+    这个坑很隐蔽 —— 它排在候选计划的最前面，匿名结果一到手就直接 return 了，
+    根本走不到能认出会员的 eapi 那一步（见 `resolve()` 里的顺序说明）。
+    """
     r = requests.get("https://music.163.com/api/song/enhance/player/url",
                      params={"id": song_id, "ids": "[%d]" % song_id, "br": br},
-                     headers={"User-Agent": UA_PC, "Referer": REFERER}, timeout=TIMEOUT)
+                     headers={"User-Agent": UA_PC, "Referer": REFERER},
+                     cookies=(_cookie_dict(cookie) if cookie else None),
+                     timeout=TIMEOUT)
     d = (r.json().get("data") or [{}])[0]
     return _norm(d, source="plain")
 
@@ -193,11 +200,17 @@ def resolve(song_id, level="exhigh", cookie=None):
 
     plans = []
     br = LEVEL_BR.get(level, 320000)
-    for b in (br, 320000, 128000):
-        plans.append(("plain", b))
     idx = FALLBACK.index(level) if level in FALLBACK else 2
-    for lv in FALLBACK[idx:]:
-        plans.append(("eapi", lv))
+    level_plans = [("eapi", lv) for lv in FALLBACK[idx:]]
+    plain_plans = [("plain", b) for b in (br, 320000, 128000)]
+    if cookie:
+        # ★ 有 cookie 时必须**先问能认出会员的接口**（eapi 带 level）。
+        #   明文接口排在最前面的话，它哪怕能拿 320k 也照样"成功"，
+        #   函数立刻 return —— 结果就是黑胶会员也只下到 320kbps。
+        plans = level_plans + plain_plans
+    else:
+        plans = plain_plans + level_plans
+    order = "cookie 优先" if cookie else "匿名优先"
 
     seen = set()
     for kind, arg in plans:
@@ -206,7 +219,7 @@ def resolve(song_id, level="exhigh", cookie=None):
             continue
         seen.add(key)
         try:
-            x = (_probe_plain(song_id, arg) if kind == "plain"
+            x = (_probe_plain(song_id, arg, cookie) if kind == "plain"
                  else _probe_eapi(song_id, arg, cookie))
         except Exception as e:
             tried.append({"try": "%s:%s" % (kind, arg), "err": str(e)[:60]})
@@ -227,9 +240,10 @@ def resolve(song_id, level="exhigh", cookie=None):
         return {"ok": True, "url": x["url"], "br": x["br"], "size": x["size"],
                 "fmt": x["fmt"], "level": got_lv, "source": x["source"],
                 "downgraded": bool(got_lv and got_lv != level), "tried": tried,
-                "trial": x["trial"],
-                "reason": "请求 %s -> 实际 %s %dkbps %s"
-                          % (level, got_lv or "?", int(x["br"] / 1000), x["fmt"])}
+                "trial": x["trial"], "order": order,
+                "reason": "请求 %s -> 实际 %s %dkbps %s（%s，命中 %s:%s）"
+                          % (level, got_lv or "?", int(x["br"] / 1000), x["fmt"],
+                             order, kind, arg)}
     return {"ok": False, "tried": tried,
             "reason": "所有接口都拿不到直链（下架 / 版权受限 / 需要会员 cookie）"}
 

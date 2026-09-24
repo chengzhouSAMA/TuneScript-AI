@@ -1674,4 +1674,87 @@ session 里的 cookie = ['NMTID']
 | `ui_app.py` | 新增 `_quality_lines()`；`_download_done` 改用它（不再把请求档位当实际档位）；路径 normpath |
 | `lang_dev/_check_newui.py` | 新增 §7 共 6 项音质展示断言 |
 
+---
+---
+
+# 第十三部分：黑胶会员却只下到 320kbps
+
+> 主人原话：**「但我是黑胶会员啊」**。
+> 上一轮修的是"提示写错"，这一轮是**真的拿不到无损**。
+
+## 80. 根因：匿名接口排在候选表最前面，拿到 320k 就 return 了
+
+`netease.resolve()` 按计划表逐个试，**第一个"成功"的就直接返回**。而旧计划表是：
+
+```python
+plans = []
+br = LEVEL_BR.get(level, 320000)
+for b in (br, 320000, 128000):
+    plans.append(("plain", b))          # ← 明文接口，排最前
+for lv in FALLBACK[idx:]:
+    plans.append(("eapi", lv))          # ← 带 cookie + level 的接口，排后面
+```
+
+两处叠加：
+
+1. **`_probe_plain()` 根本不接受 cookie 参数** —— 它发的是纯匿名请求，
+   服务端一律按未登录处理，最多给 320k；
+2. 它又**排在最前面** —— 320k 的 URL 一到手 `ok(x)` 就成立，
+   函数立刻 `return`，**永远走不到能认出会员的 eapi 那一步**。
+
+于是无论你是不是黑胶会员，结果都是 320kbps。
+（这也解释了为什么「注意：服务端把音质降级了」这句提示是对的，
+却怎么看都不合理 —— 我们压根没拿会员身份去问过。）
+
+## 81. 改法
+
+```python
+level_plans = [("eapi", lv) for lv in FALLBACK[idx:]]   # 认得出会员
+plain_plans = [("plain", b) for b in (br, 320000, 128000)]
+if cookie:
+    plans = level_plans + plain_plans      # ★ 有 cookie：先问能认出会员的接口
+else:
+    plans = plain_plans + level_plans      # 没 cookie：保留原来的匿名快速通道
+```
+
+- `_probe_plain(song_id, br, cookie=None)` 现在**会把 cookie 发出去**（`cookies=`），
+  兜底那一路也不再是"裸奔"。
+- 返回值多了 `order`，`reason` 也写清楚**是哪一路命中的**：
+  `请求 hires -> 实际 exhigh 320kbps mp3（cookie 优先，命中 eapi:lossless）`——
+  下次再出问题，一眼能看出是"没带上身份"还是"这首歌真的没有无损"。
+
+## 82. 验证（`lang_dev/_probe_quality_order.py`，8/8）
+
+拦住两个探针、记录真实调用顺序：
+
+| 场景 | 实际顺序 |
+|---|---|
+| **有 cookie** | `eapi:hires → eapi:lossless → eapi:exhigh → … → plain:1900000 → plain:320000 → plain:128000` |
+| 没 cookie | `plain:1900000 → plain:320000 → plain:128000 → eapi:hires → …`（原样不变） |
+
+另有：明文探针带 cookie 时确实发出 `{'MUSIC_U': 'abc', '__csrf': 'def'}`、
+不带时不硬塞；真实联网匿名取直链回归仍然 `320 kbps mp3`（免费路径没被弄坏）。
+
+`_selfcheck.py` **93/93**（新增 §[14] 共 5 项）。
+
+## 83. 出货 exe
+
+这次主人把实例关了，顺利换进 `dist`：
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 547.8 MB |
+| sha256 | `AEE9BA93D5AFB631549D64F12CF5F2CC19AA5DD87E1C26C32595D5198149371A` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `43CD14DA…`） |
+| 归档校验 | 45 项，0 问题 |
+
+## 84. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `netease.py` | `_probe_plain` 接受并发送 cookie；`resolve()` 有 cookie 时把 eapi 计划提到最前；`reason` 增加命中路径与策略 |
+| `lang_dev/_probe_quality_order.py` | **新增**：顺序回归 + 联网回归，8 项 |
+| `lang_dev/_selfcheck.py` | 新增 §[14] 共 5 项 |
+
 

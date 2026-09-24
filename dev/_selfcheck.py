@@ -450,6 +450,42 @@ def main():
     check("TS_LANG_SEG=1 → enabled()=True", lp.enabled() is True)
     os.environ.pop("TS_LANG_SEG", None)
 
+    print("=== [14] 取直链顺序：会员必须走认得出会员的接口 ===")
+    import netease as NE
+    _calls = []
+    _op, _oe = NE._probe_plain, NE._probe_eapi
+    _blank = {"source": "x", "code": 200, "url": None, "br": 0, "size": 0,
+              "fmt": "", "level": None, "trial": None}
+    NE._probe_plain = lambda sid, br, cookie=None: (_calls.append(("plain", br, bool(cookie))) or dict(_blank))
+    NE._probe_eapi = lambda sid, lv, cookie=None: (_calls.append(("eapi", lv, bool(cookie))) or dict(_blank))
+    try:
+        NE.resolve(1, level="hires", cookie="MUSIC_U=FAKE;")
+        check("有 cookie 时第一个探针是 eapi（带 level）",
+              _calls and _calls[0][0] == "eapi", str(_calls[0] if _calls else None))
+        check("有 cookie 时 eapi 那一路真的带了 cookie",
+              bool(_calls) and _calls[0][2] is True)
+        check("有 cookie 时明文接口排在 eapi 之后",
+              all(c[0] == "eapi" for c in _calls[:5]), str([c[0] for c in _calls[:5]]))
+        _calls.clear()
+        NE.resolve(1, level="hires", cookie="")
+        check("没 cookie 时仍是匿名快速通道优先",
+              _calls and _calls[0][0] == "plain", str([c[0] for c in _calls[:4]]))
+    finally:
+        NE._probe_plain, NE._probe_eapi = _op, _oe
+    # 明文探针必须真的把 cookie 发出去（不然会员也只拿到 320k）
+    _sent = {}
+    _og = NE.requests.get
+    NE.requests.get = lambda url, **kw: (_sent.update(kw) or type("R", (), {"json": lambda s: {"data": [{}]}})())
+    try:
+        NE._probe_plain(1, 320000, "MUSIC_U=abc; __csrf=def")
+        check("明文探针带 cookie 时真的发出去了",
+              (_sent.get("cookies") or {}).get("MUSIC_U") == "abc", str(_sent.get("cookies")))
+        _sent.clear()
+        NE._probe_plain(1, 320000, None)
+        check("没有 cookie 时不硬塞", not _sent.get("cookies"))
+    finally:
+        NE.requests.get = _og
+
     print("=== [12] R1 人声右手 / 与伴奏差一个八度 ===")
     import transcriber_app as TA
     _r = [(0.0, 1.0, 64, 80)]
