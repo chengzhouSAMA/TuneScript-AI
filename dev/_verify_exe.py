@@ -31,8 +31,10 @@ MUST_DATA = [
 ]
 
 # ---- PYZ 层：必须存在的 Python 模块 ----
+# ⚠️ 入口脚本**不在** PYZ 里：PyInstaller 把 a.scripts 存进 CArchive，键名就是脚本名
+#    （本工程 = `transcriber_app`）。旧版这里写 `__main__` 并只看"模块名里含 __main__"，
+#    结果被 `numpy.f2py.__main__` 蒙混过关 —— 那是个假阳性，已改由下面的脚本层检查。
 MUST_MOD = [
-    ("__main__", "主程序（PyInstaller 把入口脚本存为 __main__）"),
     ("lang_id", "LID 适配层"),
     ("netease", "网易云搜索下载"),
     ("en_phoneme", "英语音素/音节/IPA"),
@@ -140,13 +142,19 @@ def main():
             bad += (0 if ok else 1)
             print("  %s %-30s %s" % ("✓" if ok else "✗", sub, what))
 
-    # ---- 内容层：cookie 路径修复必须真的编译进了 exe（模块在 ≠ 内容是新的）----
+    # ---- 内容层：模块在 ≠ 内容是新的，所以要解出 code 逐项核对 ----
     print("\n=== 内容层（netease_login 里的 cookie 定位方式）===")
     WANT_CONST = (("netease_cookie.txt", "cookie 文件名"),
                   ("frozen", "冻结态判断（sys.frozen）"),
                   ("executable", "取 exe 自身目录（sys.executable）"))
+    # 主程序不在 PYZ 里 —— 去 CArchive 的脚本层找（见本函数末尾的「脚本层」）
+    WANT_MAIN = (("_enforce_octave_gap", "R1 左右手强制拉开一个八度"),
+                 ("_hand_gap_min", "R1 间隔度量"),
+                 ("_build_accomp", "R2 无人声段伴奏整理"),
+                 ("_accomp_legacy", "R2 回退路径（TS_ACCOMP_BOOST=0）"))
+    n_content = len(WANT_CONST) + len(WANT_MAIN)
     if pyz_name is None:
-        bad += len(WANT_CONST)
+        bad += n_content
     else:
         tmpd2 = tempfile.mkdtemp(prefix="execonst_")
         p2 = os.path.join(tmpd2, "PYZ.pyz")
@@ -154,37 +162,69 @@ def main():
             with open(p2, "wb") as f:
                 f.write(a.extract(pyz_name))
             z2 = ZlibArchiveReader(p2)
-            key = None
-            for k in z2.toc:
-                if str(k).lower().replace("\\", "/") == "netease_login":
-                    key = k
-                    break
-            if key is None:
+
+            def _code_of(name):
+                for k in z2.toc:
+                    if str(k).lower().replace("\\", "/") == name:
+                        return z2.extract(k)
+                return None
+
+            mod = _code_of("netease_login")
+            if mod is None:
                 print("  ! PYZ 里没找到 netease_login")
                 bad += len(WANT_CONST)
             else:
-                strs = _collect_strings(z2.extract(key))
-                print("  常量数：%d" % len(strs))
+                strs = _collect_strings(mod)
+                print("  netease_login 常量数：%d" % len(strs))
                 for want, what in WANT_CONST:
                     ok = any(want in s for s in strs)
                     bad += (0 if ok else 1)
                     print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
-                # 烤入的 cookie 模块：出货 exe 不该有，除非 TS_EXPECT_BAKED=1 明确要求
-                baked = any(str(k).lower().replace("\\", "/") == "netease_cookie_baked"
-                            for k in z2.toc)
-                if os.environ.get("TS_EXPECT_BAKED") == "1":
-                    bad += (0 if baked else 1)
-                    print("  %s %-26s %s" % ("✓" if baked else "✗",
-                                             "netease_cookie_baked", "要求烤入"))
-                else:
-                    print("  %s %-26s %s" % ("·", "netease_cookie_baked",
-                                             "已烤入" if baked else "未烤入（出货默认）"))
+            # 烤入的 cookie 模块：出货 exe 不该有，除非 TS_EXPECT_BAKED=1 明确要求
+            baked = any(str(k).lower().replace("\\", "/") == "netease_cookie_baked"
+                        for k in z2.toc)
+            if os.environ.get("TS_EXPECT_BAKED") == "1":
+                bad += (0 if baked else 1)
+                print("  %s %-26s %s" % ("✓" if baked else "✗",
+                                         "netease_cookie_baked", "要求烤入"))
+            else:
+                print("  %s %-26s %s" % ("·", "netease_cookie_baked",
+                                         "已烤入" if baked else "未烤入（出货默认）"))
         except Exception as e:
             print("  ! 常量提取失败：%s" % str(e)[:160])
-            bad += len(WANT_CONST)
+            bad += n_content
         finally:
             import shutil
             shutil.rmtree(tmpd2, ignore_errors=True)
+
+    # ---- 脚本层：入口脚本在 CArchive 里（不在 PYZ），必须解出 code 核对 ----
+    print("\n=== 脚本层（CArchive 入口脚本里的 R1/R2）===")
+    # PyInstaller 的引导/运行时脚本（pyiboot*、pyi_rth_*、pyimod*）也在这一层，
+    # 所以逐个试解 marshal，取"顶层名字最多"的那个 —— 入口脚本必然是最大的。
+    import marshal
+    best_key, best_code, best_n = None, None, -1
+    for n in toc:
+        s = str(n)
+        if s.startswith(("pyi_rth", "pyiboot", "pyimod")) or "\\" in s or "." in s:
+            continue
+        try:
+            c = marshal.loads(a.extract(n))
+        except Exception:
+            continue
+        k = len(getattr(c, "co_names", ()))
+        if k > best_n:
+            best_key, best_code, best_n = n, c, k
+    if best_key is None:
+        print("  ! CArchive 里没找到可解析的入口脚本条目")
+        bad += len(WANT_MAIN)
+    else:
+        print("  入口脚本条目：%s（顶层名字 %d 个）" % (best_key, best_n))
+        mstrs = _collect_strings(best_code)
+        print("  顶层 code 常量/名字数：%d" % len(mstrs))
+        for want, what in WANT_MAIN:
+            ok = any(want in s for s in mstrs)
+            bad += (0 if ok else 1)
+            print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
 
     print("\n=== 体积提示（不计入问题）===")
     for sub, what in MUST_NOT:
@@ -193,7 +233,7 @@ def main():
     print("  注：V0.5 出货 exe 里同样含这两个 provider（且只有 529 MB），")
     print("      所以它们不是体积元凶；真正的元凶是**整目录打包 lang_id_models**。")
 
-    total = len(MUST_DATA) + (len(MUST_MOD) if mods else 0) + 3
+    total = len(MUST_DATA) + (len(MUST_MOD) if mods else 0) + n_content
     print("\n=== 汇总：检查 %d 项，%d 问题 ===" % (total, bad))
     if bad:
         print("需修 spec 后重新构建。")

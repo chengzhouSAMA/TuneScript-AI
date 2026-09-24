@@ -1125,4 +1125,40 @@ fanwut 的初次结果 sim 0.82 < 阈值 → **触发回炉**，最终产物改�
 
 备份：`备份/pre_handgap_accomp_20260920/transcriber_app.py`（sha `EB4A7CDB…`，3586 行）。
 
+## 48. 出货 exe（本轮）
+
+> 用户原话：**「以后每一版都需要打进 exe」**。这条已写进 skill
+> `tunescript-ai-piano-rules` 的「交付纪律第一条」，以后每轮照办。
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 574,268,683 B（547.7 MB） |
+| sha256 | `4F7FE0FDAB6605AB688DA2685EA6C1086A9E68CFC98BBDAA67F64CD4D16993D2` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `F1533D16…`，cookie 路径修复版） |
+| 归档校验 | `lang_dev/_verify_exe.py` —— **33 项，0 问题** |
+| 冒烟 | `lang_dev/_smoke_exe.py --arm both` —— OFF `magic 11/11`、ON `magic 12/12`，退出码均 0 |
+| 烤入 cookie | 无（构建目录里没有 `netease_cookie.txt`，spec 已明确提示） |
+
+**exe 内实测出现 R2 的日志**（这是"新代码真的在 exe 里"的端到端证据，
+不是"模块在不在"那种静态判断）：
+
+```
+[cli] AI 正在识别其他轨(电子音)(乐曲越长越久，请耐心等待)…
+[cli] 无人声段伴奏加强：other 轨单独识别 69 个音，只并入纯伴奏段。
+```
+
+### 48.1 ⚠️ `_verify_exe.py` 自己修掉的两个「看不到新代码」的坑
+
+1. **入口脚本不在 PYZ 里。** 它是 CArchive 的一个条目，**键名就是脚本名**
+   （本工程 = `transcriber_app`，内容是 marshal 后的 code）。原来写
+   `_code_of("__main__")` → 永远返回 None，于是"主程序内容层"的检查一直是空的。
+2. **`MUST_MOD` 里那条 `("__main__", …)` 是假阳性。** `has()` 用的是**子串**匹配，
+   而 PYZ 里有 `numpy.f2py.__main__` —— 它替真正的入口脚本"通过"了检查。
+   已删掉该条，改由新的「脚本层」检查完成：逐个试解 marshal，
+   取**顶层名字最多**的那个（= 入口脚本），再从它的 code 常量/名字里核对
+   `_enforce_octave_gap` / `_hand_gap_min` / `_build_accomp` / `_accomp_legacy`。
+
+这两条又是"模块在 ≠ 内容是新的"的实例 —— **校验脚本本身也可能在骗人**。
+
 
