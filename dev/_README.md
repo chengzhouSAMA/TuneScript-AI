@@ -2231,6 +2231,24 @@ drums          RMS -12.03 dBFS   <250Hz 占  76.7%   （鼓，本就不参与）
 spec 输出 `[spec] 构建目录没有 netease_cookie.txt，本次不烤入 cookie` —— 确认**没有把
 cookie 烤进这个要分发的 exe**。
 
+**新行为在 exe 里确实生效**（不是"代码在包里"而已）：拿 inhuman 直接喂出货的 exe，
+
+```
+dist\TuneScript AI V0.5.1.exe --cli --audio "...\inhuman - ISOxo.flac" --outdir ...
+[cli] 回炉成功：DTW 成本降到 0.140(相似度 0.87)，采用新结果。
+[cli] 间奏补左手：9 个音填进 19 处空档（共 58.6s）。
+[cli] 间奏补音：分轨伴奏 1289 个音并入右手候选池（原混音候选 779 个）。
+[cli] 间奏补右手：117 个音填进 39 处空档（共 75.9s），DTW 成本 0.140→0.162，已采用。
+[cli] 音域分离：左手 2 个音下移八度（共 3 个），右手 0 个音升八度（共 0 个），…
+```
+
+（`间奏补右手` 之后**没有回滚行**，直接就是 `音域分离` —— 采用了。）
+
+⚠️ 把 exe 输出重定向到文件时，PowerShell 用**控制台代码页**解码 exe 写的 UTF-8，
+中文会被换成 U+FFFD 且**不可还原**（我第一次就被这个坑掉一次）。要么先设
+`[Console]::OutputEncoding = [Text.UTF8Encoding]::new()`，要么用
+`lang_dev/_show_exe_log.py` 读日志 —— 它中文丢了也能把每行的数字抽出来核对。
+
 自检：`_test_handgap_accomp.py` **66/66**（新增 20 项）、`_selfcheck.py` **99/99**、
 `_check_newui.py` 54/54、`_check_gui.py` 0 问题。
 
@@ -2243,6 +2261,7 @@ cookie 烤进这个要分发的 exe**。
 | `lang_dev/_selfcheck.py` | 本轮声明的实现改成 R2b/R2c 三件；累计护栏 700 → 900（写明实测 +705） |
 | `lang_dev/_verify_exe.py` | 内容层新增 `_fill_hand_gaps` / `_gap_notes` / `TS_GAP_FILL_WIN` / `_rpass` 四项 |
 | `lang_dev/_diag_frag_interlude.py` | 找人声轨时剥掉 `_B_<变体>` 后缀，并支持 `_work/<key>`（以前只认 `_stems/<key>`） |
+| `lang_dev/_show_exe_log.py` | **新增**：读 exe 的 `--cli` 日志（中文被控制台代码页洗掉时退化看数字） |
 | `回归验收/_work/inhuman/` | **新增**：inhuman 六轨冻结（把 inhuman 变成第 4 首确定性验收曲） |
 | `备份/pre_gapfill_20260925/` | **新增**：本轮改动前的源码快照（做逐字节还原对照用） |
 
