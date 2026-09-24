@@ -269,6 +269,131 @@ check('所以产物不是超集（旧音被顶掉，不是被删）',
 check('两边都只产出 1 个音（限速与取最高音没变）',
       len(_rA) == 1 and len(_rB) == 1)
 
+print('\n=== 12) 轨优先级：_accomp_weights（鼓不识别 / 贝斯最后） ===')
+_p = T.ACCOMP_PRIORITY
+check('默认优先级是 piano>guitar>other>bass',
+      _p == ('piano', 'guitar', 'other', 'bass'), 'got=%s' % (_p,))
+check('**鼓点不在优先级表里**（鼓永不识别）', 'drums' not in _p)
+
+_w = T._accomp_weights(_p)
+check('优先档权重 1.0', _w['piano'] == 1.0 and _w['guitar'] == 1.0
+      and _w['other'] == 1.0, 'w=%s' % _w)
+check('最后一档（贝斯）被压到 ACCOMP_LAST_W', _w['bass'] == T.ACCOMP_LAST_W,
+      'bass=%.2f / LAST_W=%.2f' % (_w['bass'], T.ACCOMP_LAST_W))
+check('贝斯权重严格低于优先档（"优先性最后"）', _w['bass'] < 1.0)
+check('没有 drums 的权重', 'drums' not in _w)
+check('两档时最后一档才是低档',
+      T._accomp_weights(('piano', 'guitar'))['guitar'] == T.ACCOMP_LAST_W)
+check('单档时它就是最后一档',
+      T._accomp_weights(('piano',))['piano'] == T.ACCOMP_LAST_W)
+check('空表不炸', T._accomp_weights(()) == {})
+
+# 显式权重覆盖
+os.environ['TS_ACCOMP_WEIGHTS'] = 'piano=1,guitar=0.5,bass=0.9'
+import importlib as _il
+_il.reload(T)
+_w2 = T._accomp_weights(T.ACCOMP_PRIORITY)
+check('TS_ACCOMP_WEIGHTS 逐档覆盖生效',
+      _w2['guitar'] == 0.5 and _w2['bass'] == 0.9 and _w2['piano'] == 1.0,
+      'w=%s' % _w2)
+del os.environ['TS_ACCOMP_WEIGHTS']
+
+print('\n=== 13) 旧开关名 TS_ACCOMP_STEMS / 旧常量别名仍然认 ===')
+check('ACCOMP_STEMS 是 ACCOMP_PRIORITY 的别名（老脚本照常能覆盖）',
+      tuple(T.ACCOMP_STEMS) == tuple(T.ACCOMP_PRIORITY))
+os.environ['TS_ACCOMP_STEMS'] = 'piano,guitar'
+_il.reload(T)
+check('设 TS_ACCOMP_STEMS 仍能改优先级顺序',
+      T.ACCOMP_PRIORITY == ('piano', 'guitar'), 'got=%s' % (T.ACCOMP_PRIORITY,))
+del os.environ['TS_ACCOMP_STEMS']
+os.environ['TS_ACCOMP_PRIORITY'] = 'other,piano,bass'
+_il.reload(T)
+check('新名 TS_ACCOMP_PRIORITY 优先于旧名',
+      T.ACCOMP_PRIORITY == ('other', 'piano', 'bass'), 'got=%s' % (T.ACCOMP_PRIORITY,))
+del os.environ['TS_ACCOMP_PRIORITY']
+_il.reload(T)
+
+print('\n=== 14) 加权合并实测：贝斯被压到 0.4、鼓点不进来、电平锚点不变 ===')
+# 用两条单频正弦当"轨"，合成后量各分量的幅度，直接证明三点：
+#   · 贝斯按 ACCOMP_LAST_W 衰减（不是等权相加）；
+#   · 鼓点即使给了文件也不会被并进来（鼓点不识别）；
+#   · 合并后整体 RMS 仍锚定在"最响的那条参与轨"上（电平纪律没被权重破坏）。
+import tempfile
+import numpy as np
+import soundfile as sf
+
+_SR, _SEC = 22050, 2.0
+_t = np.arange(int(_SR * _SEC)) / _SR
+_TMPD = tempfile.mkdtemp(prefix='ts_prio_')
+
+
+def _tone(name, freq, amp):
+    p = os.path.join(_TMPD, name)
+    sf.write(p, (amp * np.sin(2 * np.pi * freq * _t)).astype('float32'), _SR,
+             subtype='PCM_16')
+    return p
+
+
+def _amp(path, freq):
+    y, sr = sf.read(path, dtype='float32', always_2d=True)
+    y = y[:, 0]
+    n = len(y)
+    w = np.hanning(n)
+    tt = np.arange(n) / sr
+    return float(2.0 * np.abs(np.sum(y * w * np.exp(-2j * np.pi * freq * tt)))
+                 / np.sum(w))
+
+
+def _rms(path):
+    y, _sr = sf.read(path, dtype='float32', always_2d=True)
+    return float(np.sqrt(np.mean(y ** 2)))
+
+
+_p = _tone('song_piano.wav', 440.0, 0.50)
+_b = _tone('song_bass.wav', 110.0, 0.50)
+_d = _tone('song_drums.wav', 60.0, 0.50)
+_stems = {'piano': _p, 'bass': _b, 'drums': _d}
+
+_keep_prio, _keep_w = T.ACCOMP_PRIORITY, T.ACCOMP_LAST_W
+T.ACCOMP_PRIORITY = ('piano', 'bass')
+T.ACCOMP_LAST_W = 0.40
+_msgs = []
+_lab, _out = T._merge_accomp_stems(_stems, _msgs.append, out_dir=_TMPD)
+check('鼓点没参与合并（标签只有 piano+bass）', _lab == 'piano+bass', 'label=%s' % _lab)
+check('鼓点频率（60Hz）在合并结果里几乎为零', _amp(_out, 60.0) < 0.01,
+      'amp=%.4f' % _amp(_out, 60.0))
+_a440, _a110 = _amp(_out, 440.0), _amp(_out, 110.0)
+# 合成前 440 与 110 等幅，贝斯权重 0.4 ⇒ 输出幅度比应为 1/0.4 = 2.5
+check('贝斯被压到 0.4（440/110 幅度比 ≈ 2.5）', abs(_a440 / _a110 - 2.5) < 0.08,
+      'ratio=%.3f（440=%.3f / 110=%.3f）' % (_a440 / _a110, _a440, _a110))
+check('电平锚点仍是最响参与轨（合并 RMS ≈ piano RMS）',
+      abs(_rms(_out) / _rms(_p) - 1.0) < 0.02,
+      'merged=%.4f / anchor=%.4f' % (_rms(_out), _rms(_p)))
+check('日志里报出了优先级与权重',
+      any(('优先级' in m and '权重' in m) for m in _msgs), _msgs[-1][:70])
+
+# 电平锚点必须**与低优先档在不在场无关**。
+# 造一条比优先档更响的贝斯：旧写法会把锚点换成贝斯、整体电平跟着变，
+# 那样"内容变了"和"电平变了"就混成一个自变量了。
+_loud_bass = _tone('song_bass_loud.wav', 110.0, 1.60)
+_lab2, _out2 = T._merge_accomp_stems({'piano': _p, 'bass': _loud_bass},
+                                     _msgs.append, out_dir=_TMPD)
+check('贝斯比钢琴还响时，锚点仍取优先档 piano（不被低优先档顶替）',
+      any(('最强轨 piano' in m) for m in _msgs), _msgs[-1][:70])
+check('因此合并电平仍 ≈ piano 的 RMS（低优先档不改变整体电平）',
+      abs(_rms(_out2) / _rms(_p) - 1.0) < 0.02,
+      'merged=%.4f / piano=%.4f' % (_rms(_out2), _rms(_p)))
+check('但贝斯内容确实进来了（110Hz 存在）', _amp(_out2, 110.0) > 0.05,
+      'amp110=%.3f' % _amp(_out2, 110.0))
+
+# 权重 0 = 回到 2026-09-19 的"贝斯不参与"口径
+T.ACCOMP_LAST_W = 0.0
+_lab0, _out0 = T._merge_accomp_stems(_stems, lambda m: None, out_dir=_TMPD)
+check('LAST_W=0 时贝斯按不参与处理', _lab0 == 'piano', 'label=%s' % _lab0)
+check('LAST_W=0 时直接返回那条轨的原始文件', os.path.abspath(_out0) == os.path.abspath(_p))
+
+T.ACCOMP_PRIORITY, T.ACCOMP_LAST_W = _keep_prio, _keep_w
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:

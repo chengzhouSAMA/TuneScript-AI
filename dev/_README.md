@@ -2265,5 +2265,122 @@ dist\TuneScript AI V0.5.1.exe --cli --audio "...\inhuman - ISOxo.flac" --outdir 
 | `回归验收/_work/inhuman/` | **新增**：inhuman 六轨冻结（把 inhuman 变成第 4 首确定性验收曲） |
 | `备份/pre_gapfill_20260925/` | **新增**：本轮改动前的源码快照（做逐字节还原对照用） |
 
+---
+
+# 轨优先级（2026-09-25 第二轮）
+
+主人原话：**「我们将音轨识别设为优先性的，鼓点不识别，贝斯优先性最后，改完并打包」**。
+
+## 114. 优先级表与权重
+
+**`piano > guitar > other > bass`**，鼓点不在表里。
+
+| 做什么 | 在哪 |
+|---|---|
+| 优先级表 | `ACCOMP_PRIORITY`（env `TS_ACCOMP_PRIORITY`；旧名 `TS_ACCOMP_STEMS` 仍然认） |
+| 权重换算 | `_accomp_weights()`：优先档 1.0，**最后一档** = `ACCOMP_LAST_W`（默认 **0.40** ≈ −8 dB） |
+| 逐档覆盖 | `TS_ACCOMP_WEIGHTS="piano=1,guitar=0.5,bass=0.3"` |
+| 实际合并 | `_merge_accomp_stems()` —— **加权相加** |
+
+**为什么是"加权合并"而不是"按优先级选一条"**：本项目 2026-09-13 已实测
+（反乌托邦 60~80s）A「按响度选最响单轨」sim 0.7915 ＜ B「合并 piano+guitar+other」
+0.7956 ＜ C「合并全部非人声轨」0.7996 —— 单调递增，合并优于单轨。
+所以"优先性"落在**相加系数**上：高档原样进，低档压低了进。
+
+口径变更要说清：**2026-09-19 的要求是"贝斯完全不参与"**，本次主人改成
+"最后优先级"，所以贝斯回来了（压在 0.40）。想退回旧口径：`TS_ACCOMP_LAST_W=0`。
+
+### 顺手修掉的一个电平坑（A/B 里发现的）
+
+原来电平锚点取"最响的参与轨"。贝斯一并进来，它常常就是最响的那条 ⇒ **锚点被低优先档顶替，
+整体电平跟着变** —— 于是"内容变了"和"电平变了"混成同一个自变量，正好是这条纪律要防的。
+实测 shiki：加贝斯前锚点 guitar(−2.54 dB)，加贝斯后变成 bass(0.00 dB)。
+
+改成 **锚点只在"权重最高的那一档"里选**：低优先档在不在场都不动锚点；所有轨权重相同时
+退化成旧行为"最响的参与轨"，与改动前等价。
+
+## 115. ★ 实测：出厂（回炉）路径上四首歌产物**逐字节相同**
+
+冻结分轨，同一份 stems，改动前源码（`--code 备份/pre_priority_20260925/`）vs 改动后：
+
+| 曲 | 合并进伴奏的轨（改动前 → 改动后） | 产物 MIDI sha256 前 16 位 | 结论 |
+|---|---|---|---|
+| fanwut | guitar → guitar+bass | `150DEA5B47667645` | **相同** |
+| shiki | guitar+other → guitar+other+bass | `551EF658C37F204E` | **相同** |
+| jiabin | piano+guitar+other → +bass | `D2ABD2A7AC7995F1` | **相同** |
+| inhuman | piano+guitar+other → +bass | `BA39396030E22CB8` | **相同** |
+
+四首的 `sim` / `cost` / `n_notes` / `frag` 也全部一模一样（小数点后 16 位）。
+
+**原因不是"改动没生效"**：日志里能明确看到优先级与权重都变了（例如
+`已合并伴奏轨（guitar+other+bass）… 优先级 guitar>other>bass，权重 guitar 1.00/other 1.00/bass 0.40`）。
+是因为**这四首全都走了回炉**（`reheat: adopted`），而回炉会把分轨编排的整条结果
+换成 `_simple_piano(整曲混音)` ⇒ 伴奏合并的产物只影响"回炉前的候选"，
+**不进最终产物**（这就是第 103 节记的坑 №3，这次用逐字节相同把它钉死了）。
+
+⚠️ 也就是说：**在回炉曲上，轨优先级改不动产物**。它只对"没回炉"的曲子直接生效。
+
+## 116. 改动真正生效的那条路（`--no-reheat` 诊断臂）
+
+`regress_one.py --no-reheat` 会把回炉屏蔽掉，让分轨编排的结果活到最终产物 ——
+这正是本次改动作用的路径。四首曲、两个臂：
+
+| 曲 | sim 改动前 → 改动后 | Δ | 左手音数 | 左手最低音 | ≤48 的低音数 |
+|---|---|---|---|---|---|
+| fanwut | 0.8265 → 0.8244 | −0.0021 | 128 → 124 | 23 → **21** | 81 → 81 |
+| shiki | 0.7435 → **0.7580** | **+0.0144** | 50 → **59** | 36 → **29** | 15 → **42** |
+| jiabin | 0.8465 → 0.8455 | −0.0009 | 297 → 294 | 21 → 21 | 234 → 232 |
+| inhuman | 0.7803 → **0.7830** | **+0.0027** | 161 → **178** | 21 → 21 | 29 → **44** |
+
+四首均值 **+0.0035**；除 shiki(+0.0144) 外都在项目自测噪声地板 ±0.01 以内。
+
+**"贝斯优先性最后"确实落地了**：左手最低音往下走（shiki 36→29，低了五度），
+≤48 的低音音符数明显变多（shiki 15→42、inhuman 29→44）；
+fanwut/jiabin 基本不变（那两首的贝斯轨本身很弱或已被"近乎空轨"跳过）。
+
+## 117. ⚠️ 一条环境坑（本轮踩到的）
+
+`regress_one.py --code <旧快照>` 加载的是**改动前**的源码，那时还没有 `ACCOMP_PRIORITY`。
+臂 B 的日志行如果直接写 `ta.ACCOMP_PRIORITY` 就会 `AttributeError` 崩在开跑之前 ——
+现象是**整条命令没有任何输出**（我的 `Select-String` 把 traceback 过滤掉了，白等一轮）。
+已改成 `getattr(ta, 'ACCOMP_PRIORITY', None) or ta.ACCOMP_STEMS`。
+**用 `--code` 跑旧快照时，任何新符号都要走 `getattr` 兜底。**
+
+## 118. 出货 exe
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 547.8 MB |
+| sha256 | `EE9FC845ED5DAD04EF110A3B5F9EB3E4A82E4E7945584AE36A6ABA9FF769B55C` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `665B2201…`） |
+| 归档校验 | `_verify_exe.py` 检查 **52 项，0 问题**（内容层新增 `ACCOMP_PRIORITY` / `_accomp_weights` / `ACCOMP_LAST_W` 三项全 ✓） |
+| 冒烟 | `_smoke_exe.py --arm both` |
+
+自检：`_test_handgap_accomp.py` **89/89**（本轮新增 12 项）、`_selfcheck.py` **99/99**、
+`_check_newui.py` 54/54、`_check_gui.py` 0 问题。
+
+**新规则在出货 exe 里确实生效**（拿 exe 直接跑 shiki，只截 ASCII 部分）：
+
+```
+[cli] 已合并伴奏轨（guitar+other+bass）…优先级 guitar>other>bass，权重 guitar 1.00/other 1.00/bass 0.40；…
+```
+
+`guitar+other+bass` / `guitar>other>bass` / `1.00/1.00/0.40` 这三段是 ASCII，
+控制台代码页洗不掉 —— 它们只可能来自 `_accomp_weights()`，所以能当证据用。
+（中文部分被洗成 U+FFFD 的原因见第 117 节与上一轮记录。）
+
+## 119. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `transcriber_app.py` | `ACCOMP_STEMS` → `ACCOMP_PRIORITY`（贝斯并入、鼓点不入表）；**新增** `_accomp_weights()`、`ACCOMP_LAST_W`、`TS_ACCOMP_WEIGHTS`；`_merge_accomp_stems()` 由等权相加改成加权合并，并**修正电平锚点**（只在最高权重档里选） |
+| `lang_dev/_test_handgap_accomp.py` | 第 12/13/14 节：优先级表、权重覆盖、旧开关名兼容、单频正弦实测（权重比 2.500、鼓点 0.000、锚点不变）（66 → 89） |
+| `lang_dev/_selfcheck.py` | 本轮声明的实现改成优先级三件；登记本轮被替换掉的旧实现；失败时打印**未登记的那几行**（不用再在 28 行里翻） |
+| `lang_dev/_verify_exe.py` | 内容层新增 `ACCOMP_PRIORITY` / `_accomp_weights` / `ACCOMP_LAST_W` |
+| `回归验收/regress_one.py` | `--accomp` 改设 `ACCOMP_PRIORITY`；臂 A 的 lambda 收下 `out_dir`（否则臂 A 一跑就崩）；`--code` 旧快照的符号用 `getattr` 兜底 |
+| `备份/pre_priority_20260925/` | **新增**：本轮改动前的源码快照 |
+
+
 
 

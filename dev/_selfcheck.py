@@ -78,11 +78,11 @@ def main():
         print("     最近备份：%s" % last_name)
         print("     diff：%d hunk / +%d / -%d" % (hunks, len(adds), len(dels)))
         joined = "".join(adds)
-        # 本轮（2026-09-25 间奏补音）：回炉路径新增 R2b/R2c。
-        # 上一轮是 R1/R2（_enforce_octave_gap / _build_accomp），本轮换成补音的三个件。
-        check("自上次备份以来包含本轮声明的间奏补音实现",
-              "_fill_hand_gaps" in joined and "TS_GAP_FILL_WIN" in joined
-              and "_gap_notes" in joined,
+        # 本轮（2026-09-25 轨优先级）：伴奏轨改成按优先级加权合并。
+        # 上一轮是间奏补音（_fill_hand_gaps / TS_GAP_FILL_WIN / _gap_notes），本轮换成这三件。
+        check("自上次备份以来包含本轮声明的轨优先级实现",
+              "_accomp_weights" in joined and "ACCOMP_PRIORITY" in joined
+              and "ACCOMP_LAST_W" in joined,
               "新增 %d 行" % len(adds))
         check("新增行数在理智范围内（<=400；仅防意外大改，不是预算）",
               len(adds) <= 400, "新增 %d 行" % len(adds))
@@ -115,12 +115,36 @@ def main():
             # 本轮：扫码「过期」从"让用户关掉重开"改成自动换一张
             "st.set('二维码已过期，请关掉重开')",
         )
+        # 本轮（2026-09-25 轨优先级）：把「等权相加」换成「按优先级加权合并」，
+        # 被换掉的旧实现逐行登记在这里（常量表 + 合并函数体）。
+        known_del += (
+            'ACCOMP_STEMS = tuple(',
+            'x.strip() for x in os.environ.get("TS_ACCOMP_STEMS",',
+            '"piano,guitar,other").split(",") if x.strip())',
+            '"""把多条件奏轨【相加合并】成一条 wav，返回 (标签, 路径)。',
+            '两条纪律（2026-09-19 全曲回归后补，实测见 回归验收/全曲回归验收报告.md 第十节）：',
+            '3) 默认【不含 drums】：鼓是打击噪声、对钢琴转录是干扰（附-7 实测含鼓',
+            '仅再高 0.004，在噪声内）。要含鼓请显式设 TS_ACCOMP_STEMS。',
+            '4) 默认【不含 bass】：贝斯不参与（2026-09-19 用户要求）。贝斯轨照常被',
+            '分离，但不并入合并轨、也不单独进左手；低频既污染和弦识别，也不是',
+            '本次要还原的内容。要重新并入请显式设 TS_ACCOMP_STEMS 并写上 bass。',
+            'for k in ACCOMP_STEMS:',
+            'progress(f"合并后只剩 {kept[0][0]} 一条有效伴奏轨，直接使用。")',
+            'acc[: y.shape[0], : y.shape[1]] += y',
+            'target_name, target_rms = max(((t[0], t[3]) for t in kept), key=lambda x: x[1])',
+        )
         # 删掉**纯注释行或空行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。
         # 注意 difflib 的删除行首还带一个 '-'，判断注释前要先剥掉。
         ok_del = all(not l[1:].strip() or l[1:].strip().startswith("#")
                      or any(k in l for k in known_del)
                      for l in dels)
+        if not ok_del:
+            # 只报"没登记的那几行"，不然要人去 28 行里翻哪一条漏了。
+            for l in dels:
+                if (l[1:].strip() and not l[1:].strip().startswith("#")
+                        and not any(k in l for k in known_del)):
+                    print("     未登记：%s" % l[1:].rstrip()[:100])
         check("被删/改的行要么是注释/空行、要么属于已知旧实现", ok_del, "%d 行" % len(dels))
     else:
         check("找到备份链", False, "备份目录里没有 transcriber_app.py")

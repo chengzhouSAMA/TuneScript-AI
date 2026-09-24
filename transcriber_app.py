@@ -208,22 +208,36 @@ def _btd_track_notes(wav_path, model, progress, label):
     return notes
 
 
-# 参与「左手伴奏合并」的轨（顺序不影响结果，只影响日志标签）。
-# 2026-09-13 实测（反乌托邦 60-80s，同一转谱器/渲染，见 项目备忘2.0.md）：
-#   A 现状「按响度选最响单轨(guitar)」  sim = 0.7915
-#   B 「合并 piano+guitar+other」        sim = 0.7956
-#   C 「合并全部非人声轨」                sim = 0.7996
-# 单调递增 -> 合并优于单轨。默认取 piano/guitar/other：
-# 【2026-09-19 用户要求】贝斯不参与：不再并入伴奏合并轨，也不再单独进左手。
-# 贝斯轨依然会被 Demucs 分离出来（文件名/界面照常显示茎干轨），只是完全不
-# 参与转谱。旧的做法是把 bass 一起相加进合并轨(见上方实验 C)——低频会污染
-# 和弦识别、并让左手出现不需要的低音线，故明确摘除。
-# 鼓是打击噪声、对钢琴转录是干扰，同样排除(实验 C 含鼓仅再高 0.004，在噪声内)。
-# 想改参与合并的轨：改这个常量，或设环境变量 TS_ACCOMP_STEMS=piano,guitar
-# （env 覆盖能力保留：显式写上 bass 才会重新并入合并轨，但那不再是默认行为。）
-ACCOMP_STEMS = tuple(
-    x.strip() for x in os.environ.get("TS_ACCOMP_STEMS",
-                                      "piano,guitar,other").split(",") if x.strip())
+# 参与「左手伴奏合并」的轨，**按优先级从左到右排列**（越靠前越优先）。
+#
+# 【2026-09-25 主人要求】音轨识别改为优先性；鼓点不识别；贝斯优先性最后。
+#   · **鼓点永不识别**：不在表里，而且全流程没有任何代码路径会去识别它
+#     （`drums` 只出现在文件名与界面标签里）。鼓是打击噪声、对钢琴转录是干扰
+#     （历史实测：含鼓只再高 0.004，在噪声内）。
+#   · **贝斯排最后**：按 `ACCOMP_LAST_W` 衰减后并入（默认 0.40 ≈ −8 dB）。
+#     注意这是**改口径**：2026-09-19 的要求是"贝斯完全不参与"（低频污染和弦识别、
+#     会让左手出现不需要的低音线）。本次主人改回"最后优先级"，所以它回来了，
+#     但压在最低一档。想退回旧口径：`TS_ACCOMP_LAST_W=0`。
+#
+# 历史实测（反乌托邦 60~80s，同一转谱器/渲染，见 项目备忘2.0.md）：
+#   A「按响度选最响单轨(guitar)」 sim = 0.7915
+#   B「合并 piano+guitar+other」   sim = 0.7956
+#   C「合并全部非人声轨」           sim = 0.7996
+# 单调递增 ⇒ **合并优于单轨**，所以这里做的是"加权合并"，不是"选一条"。
+# 想改优先级：环境变量 `TS_ACCOMP_PRIORITY=piano,guitar,other,bass`
+# （旧名 `TS_ACCOMP_STEMS` 仍然认，含义同为优先级顺序）。
+_ACCOMP_PRIORITY_ENV = (os.environ.get("TS_ACCOMP_PRIORITY")
+                        or os.environ.get("TS_ACCOMP_STEMS")
+                        or "piano,guitar,other,bass")
+ACCOMP_PRIORITY = tuple(x.strip() for x in _ACCOMP_PRIORITY_ENV.split(",") if x.strip())
+# 兼容旧名（老脚本仍会覆盖 ACCOMP_STEMS；它是同一个东西的别名）
+ACCOMP_STEMS = ACCOMP_PRIORITY
+
+# 最低优先级那档的权重。1.0 = 与优先档等权（等于旧的"实验 C 全合并"）；
+# 0 = 完全不并入（等于 2026-09-19 的"贝斯不参与"口径）。
+ACCOMP_LAST_W = float(os.environ.get("TS_ACCOMP_LAST_W", "0.40"))
+# 想逐档指定权重（覆盖上面两条规则）：TS_ACCOMP_WEIGHTS="piano=1,guitar=0.8,bass=0.3"
+ACCOMP_WEIGHTS_ENV = os.environ.get("TS_ACCOMP_WEIGHTS", "")
 
 # 「近乎空轨」门槛：RMS 低于【最强参与轨】这个比例的轨不参与合并。
 # Demucs 在非钢琴曲上常把 piano 轨分得几乎全空（反乌托邦 piano RMS 只有
@@ -232,39 +246,69 @@ ACCOMP_STEMS = tuple(
 ACCOMP_MIN_RATIO = float(os.environ.get("TS_ACCOMP_MIN_RATIO", "0.02"))
 
 
+def _accomp_weights(priority):
+    """按优先级算每条轨的合并权重。
+
+    规则（从宽到窄，后者覆盖前者）：
+      1) 优先档 = 1.0；
+      2) **最后一档** = `ACCOMP_LAST_W`（默认 0.40，即"贝斯优先性最后"）；
+      3) `TS_ACCOMP_WEIGHTS="k=v,..."` 逐档覆盖。
+    返回 {轨名: 权重}。权重只作用于合并时的相加系数，**不影响电平锚点**
+    （锚点仍取最响的那条参与轨），这样"内容变了"和"电平变了"不会混在一起。
+    """
+    w = {k: 1.0 for k in priority}
+    if priority:
+        w[priority[-1]] = ACCOMP_LAST_W
+    for part in ACCOMP_WEIGHTS_ENV.split(","):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        try:
+            w[k.strip()] = float(v)
+        except ValueError:
+            continue
+    return w
+
+
 def _merge_accomp_stems(stems, progress, out_dir=None):
-    """把多条件奏轨【相加合并】成一条 wav，返回 (标签, 路径)。
+    """把多条件奏轨【按优先级加权合并】成一条 wav，返回 (标签, 路径)。
 
     为什么合并而不是分别识别：
       和弦识别模型看到的是完整和声织体，"按响度选最响一轨"会丢掉其它乐器
       的和声（电子/术力口曲尤其明显）。相加后和声更完整，而且合并成一条
       只需跑一次识别，不增加耗时。
 
-    两条纪律（2026-09-19 全曲回归后补，实测见 回归验收/全曲回归验收报告.md 第十节）：
+    优先级（`ACCOMP_PRIORITY`，越靠前越优先）：
+      **piano > guitar > other > bass**，鼓点不参与识别。
+      优先档权重 1.0，最后一档（贝斯）按 `ACCOMP_LAST_W` 衰减（默认 0.40）。
+      所以"优先性"落在**相加系数**上：高档的乐器原样进合并轨，低档的压低了进。
+
+    三条纪律（2026-09-19 全曲回归后补，实测见 回归验收/全曲回归验收报告.md 第十节）：
       1) 【跳过近乎空轨】RMS 低于最强参与轨 ACCOMP_MIN_RATIO 倍的轨不参与；
       2) 【电平匹配】合并后整体 RMS 对齐到最强参与轨的 RMS（只降不升），
          并且仍以 0.99 峰值为上限防削波。理由：识别模型对输入电平敏感
          （实测纯 ±1 dB 增益就能让 sim 摆动约 0.01），电平不该和"内容"
          混成同一个自变量 —— 否则 A/B 比较根本说不清是内容变了还是电平变了。
-      3) 默认【不含 drums】：鼓是打击噪声、对钢琴转录是干扰（附-7 实测含鼓
-         仅再高 0.004，在噪声内）。要含鼓请显式设 TS_ACCOMP_STEMS。
-      4) 默认【不含 bass】：贝斯不参与（2026-09-19 用户要求）。贝斯轨照常被
-         分离，但不并入合并轨、也不单独进左手；低频既污染和弦识别，也不是
-         本次要还原的内容。要重新并入请显式设 TS_ACCOMP_STEMS 并写上 bass。
+         ⚠️ 电平锚点取**最响的参与轨**（与权重无关），所以改权重只改内容配比、
+         不改整体电平 —— 这正是这条纪律想要的。
+      3) 【鼓点不识别】鼓从来不在 `ACCOMP_PRIORITY` 里；全流程也没有任何
+         代码路径会识别它。
 
     任何失败都回退到旧行为 _pick_main_accomp（分离是增强，绝不影响出谱）。
     """
     import numpy as np
     import soundfile as sf
 
+    wmap = _accomp_weights(ACCOMP_PRIORITY)
     avail = []
-    for k in ACCOMP_STEMS:
+    for k in ACCOMP_PRIORITY:
         p = stems.get(k)
         if p and os.path.isfile(p):
             avail.append((k, p))
     if not avail:
         return None, None
     if len(avail) == 1:
+        # 只有一条可用的轨时没有"优先"可言，原样使用（与改动前一致）。
         progress(f"伴奏轨只有 {avail[0][0]} 一条，直接使用。")
         return avail[0][0], avail[0][1]
     try:
@@ -283,19 +327,34 @@ def _merge_accomp_stems(stems, progress, out_dir=None):
         if dropped:
             progress("跳过近乎空的伴奏轨（%s，低于最强轨的 %.1f%%）。"
                      % ("+".join(dropped), ACCOMP_MIN_RATIO * 100))
+        # 权重为 0 的档等于"不并入"（= 2026-09-19 的贝斯口径），单独报出来，
+        # 免得日志里写了 bass 却一个低频都没进去。
+        muted = [t[0] for t in kept if wmap.get(t[0], 1.0) <= 0.0]
+        if muted:
+            progress("伴奏轨 %s 的权重为 0（TS_ACCOMP_LAST_W / TS_ACCOMP_WEIGHTS），"
+                     "按不参与处理。" % "+".join(muted))
+            kept = [t for t in kept if wmap.get(t[0], 1.0) > 0.0]
         if not kept:
             progress("伴奏轨都不足以参与合并，回退最响单轨。")
             return _pick_main_accomp(stems)
         if len(kept) == 1:
-            progress(f"合并后只剩 {kept[0][0]} 一条有效伴奏轨，直接使用。")
+            progress(f"加权合并后只剩 {kept[0][0]} 一条有效伴奏轨，直接使用。")
             return kept[0][0], kept[0][1]
-        # 2) 相加后【电平匹配】到最强参与轨（只降不升）+ 峰值安全
+        # 2) 按优先级权重相加，再【电平匹配】到最强参与轨（只降不升）+ 峰值安全
         acc = np.zeros((n, n_ch), dtype="float32")
         for _k, _p, y, _r in kept:
-            acc[: y.shape[0], : y.shape[1]] += y
+            acc[: y.shape[0], : y.shape[1]] += y * wmap.get(_k, 1.0)
         peak = float(np.abs(acc).max())
         rms = float(np.sqrt(np.mean(acc ** 2)))
-        target_name, target_rms = max(((t[0], t[3]) for t in kept), key=lambda x: x[1])
+        # 电平锚点 = **权重最高的那一档**里最响的轨。
+        # 为什么不是"最响的参与轨"：把低优先档并进来时，如果它恰好最响，锚点就会被
+        # 它顶替、整体电平跟着变 —— 于是"内容变了"和"电平变了"混成同一个自变量，
+        # 正是上面第 2 条纪律要防的。实测 shiki：加贝斯前锚点是 guitar(−2.54 dB)，
+        # 加贝斯后变成 bass(0.00 dB)。改成按权重分档后，低优先档在不在场都不动锚点。
+        # 所有轨权重相同（旧行为）时，它退化成"最响的参与轨"，与改动前等价。
+        _wmax = max(wmap.get(t[0], 1.0) for t in kept)
+        _anchor = [t for t in kept if wmap.get(t[0], 1.0) >= _wmax - 1e-9]
+        target_name, target_rms = max(((t[0], t[3]) for t in _anchor), key=lambda x: x[1])
         gain = 1.0
         if rms > 0:
             gain = min(1.0, target_rms / rms)     # 只降不升，避免把电平推高
@@ -326,7 +385,12 @@ def _merge_accomp_stems(stems, progress, out_dir=None):
         out = os.path.join(d, f"{b}_accomp_merged.wav")
         sf.write(out, acc, sr, subtype="PCM_16")
         label = "+".join(t[0] for t in kept)
+        # 把"优先级顺序"和"实际生效的权重"打进日志 —— 这是主人要求的优先性
+        # 唯一能在产物侧被看见的地方（不然只能读源码才知道贝斯被压了多少）。
+        wdesc = "/".join("%s %.2f" % (k, wmap.get(k, 1.0)) for k in
+                         [t[0] for t in kept])
         progress(f"已合并伴奏轨（{label}）用于和弦识别；"
+                 f"优先级 {'>'.join(t[0] for t in kept)}，权重 {wdesc}；"
                  f"电平对齐到最强轨 {target_name}（{20.0 * np.log10(max(gain, 1e-9)):+.2f} dB）。")
         return label, out
     except Exception as e:
