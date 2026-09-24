@@ -1477,6 +1477,23 @@ def _enforce_octave_gap(left, right, min_gap=12, floor=21, grid=0.02):
     st['gap_before'] = _hand_gap_min(left, right, grid)[0]
 
     # ---- 第一趟：压左手 ----
+    # ⚠️ 光"降到 < 右手最低音 − 12"是不够的：降下来的落点很可能**已经有一个重叠的
+    #    左手音**（尤其伴奏本身就有八度重复）。撞上去就变成"同一音高被重复触发"，
+    #    听感就是**碎、抖**，项目的 fragment_ratio 也会翻好几倍。
+    #    实测 fanwut：不避让时左手同音高重叠 151 处、短音占比 13.7%→19.9%、
+    #    碎片率 0.0162→0.0513（三倍）。所以落点被占就再往下让一个八度。
+    occ = {}
+    for _s, _e, _p, _v in left:
+        occ.setdefault(_p, []).append((_s, _e))
+
+    def _occupied(pitch, s, e, self_s, self_e):
+        for a, b in occ.get(pitch, ()):
+            if abs(a - self_s) < 1e-9 and abs(b - self_e) < 1e-9:
+                continue                     # 是它自己
+            if a < e - 1e-6 and b > s + 1e-6:
+                return True
+        return False
+
     out = []
     for s, e, p, v in left:
         rgm = None
@@ -1493,6 +1510,11 @@ def _enforce_octave_gap(left, right, min_gap=12, floor=21, grid=0.02):
         while np_ > limit and np_ - 12 >= floor:
             np_ -= 12
             k += 1
+        # 落点被别的左手音占着 → 继续往下让，直到空出来或触底
+        while k and np_ - 12 >= floor and _occupied(np_, s, e, s, e):
+            np_ -= 12
+            k += 1
+            st['nudged'] = st.get('nudged', 0) + 1
         if k:
             st['moved'] += 1
             st['octaves'] += k
@@ -1501,6 +1523,7 @@ def _enforce_octave_gap(left, right, min_gap=12, floor=21, grid=0.02):
         #    交给第二趟抬右手，monitoring/jiabin 就残留了 −1 半音。
         if np_ > limit:
             st['blocked'] += 1
+        occ.setdefault(np_, []).append((s, e))     # 让后面的音看得见这个落点
         out.append((s, e, np_, v))
 
     # ---- 第二趟：触底的窗口改抬右手（人声那侧）----
@@ -1781,6 +1804,14 @@ def _fill_right_hand(right, mix_notes, vline, split_pitch=60, min_len=0.06,
     def same_pitch_near(t, p):
         return any(abs(n[0] - t) <= same_win and abs(n[2] - p) <= 1 for n in out)
 
+    def overlaps_same_pitch(s, e, p):
+        """这段时间里同一个音高**已经有音在响**吗。
+
+        有就不能再加：MIDI 里同一音高重叠 = 重复触发，听感就是"碎/抖"。
+        `same_pitch_near` 只看 ±0.05s 的邻域，盖不住长音上叠短音的情况。
+        """
+        return any(n[2] == p and n[0] < e - 1e-6 and n[1] > s + 1e-6 for n in out)
+
     def pitches_overlapping(t0, t1):
         return [n[2] for n in out if n[0] < t1 + pad and n[1] > t0 - pad]
 
@@ -1808,6 +1839,9 @@ def _fill_right_hand(right, mix_notes, vline, split_pitch=60, min_len=0.06,
         ps = pitches_overlapping(s, e)
         if ps and (pr - max(ps) > max_span or min(ps) - pr > max_span):
             st['skipped_span'] += 1
+            continue
+        if overlaps_same_pitch(s, e, pr):
+            st['skipped_dup'] = st.get('skipped_dup', 0) + 1
             continue
         out.append((s, e, pr, max(int(v), add_velocity_floor)))
         st['added_vocal'] += 1
@@ -1925,6 +1959,11 @@ def _fill_right_hand(right, mix_notes, vline, split_pitch=60, min_len=0.06,
             #    叠和弦音 —— 所以只禁"起音撞车"，密度与每窗音数上限继续兜底。
             if any(abs(x[0] - s) <= onset_guard for x in out):
                 st['skipped_onset'] += 1
+                continue
+            # 但**同一个音高**上再叠一个就是重复触发（碎/抖），这条必须挡。
+            # 实测 fanwut：右手 78 处同音高重叠，全都来自这里。
+            if overlaps_same_pitch(s, e, p):
+                st['skipped_dup'] = st.get('skipped_dup', 0) + 1
                 continue
             out.append((s, e, p, max(int(v), add_velocity_floor)))
             st['added_instr'] += 1
