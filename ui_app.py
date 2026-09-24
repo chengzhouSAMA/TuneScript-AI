@@ -42,6 +42,40 @@ def _artists(v):
     return str(v or '')
 
 
+def _quality_lines(info):
+    """把 `netease.fetch_song()` 的 info 变成几行"人话"。
+
+    ⚠️ 关键：`info['level']` 是**你请求的**档位，`info['resolve']['level']` 才是
+    服务端**实际给的**。这两个混用会显示成「实际音质：Hi-Res」，而同一份日志的
+    下一行又说"请求 hires -> 实际 exhigh 320kbps mp3" —— 自相矛盾，会让人以为
+    拿到了 Hi-Res。所以这里一律以 `resolve` 为准，并把降级原因和账号状态一起说清。
+    """
+    out = []
+    res = info.get('resolve') or {}
+    want = info.get('level') or ''
+    got = res.get('level') or ''
+    br = int(res.get('br') or 0)
+    fmt = res.get('fmt') or ''
+    if got:
+        line = '音质：%s' % LEVEL_LABEL.get(got, got)
+        if br:
+            line += '（%d kbps%s）' % (br // 1000, (' ' + fmt) if fmt else '')
+        out.append(line)
+        if want and got != want:
+            out.append('⚠️ 请求的是 %s，服务端只给了 %s —— 无损 / Hi-Res 需要黑胶会员 cookie'
+                       % (LEVEL_LABEL.get(want, want), LEVEL_LABEL.get(got, got)))
+    ck = info.get('cookie') or {}
+    if ck.get('ok'):
+        out.append('账号：已登录 %s（%s）'
+                   % (ck.get('nickname') or '?', ck.get('vip_label') or '会员状态未知'))
+    else:
+        out.append('账号：未登录 / cookie 未生效（%s）'
+                   % (ck.get('reason') or '没有 cookie，免登录最高一般 320kbps'))
+    if res.get('trial'):
+        out.append('⚠️ 这是试听片段：%s' % res['trial'])
+    return out
+
+
 def _copy_to_clipboard(widget, text):
     """把文本放进剪贴板（扫不动二维码时，可以把链接发到手机打开）。"""
     try:
@@ -607,13 +641,14 @@ class NeteasePage(Page):
 
     def _download_done(self, r):
         path, info = r
-        self.log('✅ 已下载：%s' % path)
-        actual = info.get('level') or info.get('actual_level')
-        if actual:
-            self.log('   实际音质：%s' % LEVEL_LABEL.get(actual, actual))
+        self.log('✅ 已下载：%s' % os.path.normpath(path))
+        for line in _quality_lines(info):
+            self.log('   ' + line)
         if info.get('reason'):
             self.log('   说明：%s' % info['reason'])
-        messagebox.showinfo('完成', '已下载：\n%s' % path)
+        messagebox.showinfo('完成', '已下载：\n%s\n\n%s'
+                            % (os.path.normpath(path),
+                               '\n'.join(_quality_lines(info))))
 
 
 # ---------------------------------------------------------------------------

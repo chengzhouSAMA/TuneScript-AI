@@ -1595,4 +1595,83 @@ session 里的 cookie = ['NMTID']
 | `lang_dev/_verify_exe.py` | 内容层加 2 项 |
 | `README.md` | 扫码一节补「凭据在 Set-Cookie 里」的说明 |
 
+---
+---
+
+# 第十二部分：下载完成后的音质提示自相矛盾
+
+> 主人贴的日志：
+> ```
+> ✅ 已下载：C:/Users/35968/Desktop\琵琶曲(1.1xDJ版) - DJ小楷.mp3
+>    实际音质：Hi-Res
+>    说明：请求 hires -> 实际 exhigh 320kbps mp3
+> ```
+> 同一份日志里，「实际音质：**Hi-Res**」和「实际 **exhigh** 320kbps mp3」是打架的。
+
+## 75. 根因：把「请求的档位」当成了「实际拿到的档位」
+
+`netease.fetch_song()` 的 info 里有**两个** level 字段：
+
+| 字段 | 含义 |
+|---|---|
+| `info['level']` | **你请求的**档位（用户在下拉框里选的） |
+| `info['resolve']['level']` | **服务端实际给的**档位 |
+
+`ui_app._download_done` 写的是
+`actual = info.get('level') or info.get('actual_level')` ——
+第一项就命中了"请求的档位"，所以显示的永远是你在下拉框里选的那个，
+**哪怕服务端已经降级**。（`actual_level` 这个键根本不存在，`or` 右边是死代码。）
+
+## 76. 改法
+
+把这段逻辑抽成可测的纯函数 `ui_app._quality_lines(info)`，**一律以 `resolve` 为准**，
+并把降级原因和账号状态一起说清：
+
+```
+✅ 已下载：C:\Users\35968\Desktop\琵琶曲(1.1xDJ版) - DJ小楷.mp3
+   音质：320kbps（320 kbps mp3）
+   ⚠️ 请求的是 Hi-Res，服务端只给了 320kbps —— 无损 / Hi-Res 需要黑胶会员 cookie
+   账号：已登录 <昵称>（黑胶 VIP）      ← 或者「未登录 / cookie 未生效（原因）」
+   说明：请求 hires -> 实际 exhigh 320kbps mp3
+```
+
+多出来的「账号」那一行是**排障的关键**：它能直接回答"我明明登录了，为什么还被降级"——
+是 cookie 没生效、是无会员、还是这首歌本身就没有无损授权。
+「未登录」时还会带上 `cookie_status()` 给的原因（例如"cookie 无效或已过期"）。
+
+顺带把路径显示 `os.path.normpath()` 一下，不再出现 `C:/Users/…\琵琶曲….mp3` 这种混斜杠。
+
+## 77. 验证
+
+`lang_dev/_check_newui.py` 新增 §7 共 6 项，用的就是主人这份日志的数据
+（请求 hires、实际 exhigh、320000 bps、mp3）：
+
+| 断言 | 结果 |
+|---|---|
+| 显示的是服务端实际给的档位 | ✓ `音质：320kbps（320 kbps mp3）` |
+| 没有把 hires 说成"实际音质" | ✓ |
+| 明确写出被降级 + 原因 | ✓ 含「只给了 320kbps」与「需要黑胶会员」 |
+| 带上账号状态 | ✓ 含昵称与会员档 |
+| 没降级时不乱报警 | ✓ |
+| 未登录时说明原因 | ✓ 含「cookie 无效或已过期」 |
+
+合计 **46/46**；`_selfcheck.py` 87/87、`_check_gui.py` 0 问题。
+
+## 78. ⚠️ 出货 exe：这一版**没能换进 dist**
+
+主人当时正在用（PID 8616，窗口开着），`dist\TuneScript AI V0.5.1.exe` 被占用。
+按上一轮学到的教训**没有再动 `Stop-Process`**，改为：
+
+- 构建到独立目录：`dist_new\TuneScript AI V0.5.1.exe`
+- **sha256 `99400A88CE5F1ECEC0DA0D5C5D029FFCB5AF567B5A2C1C071A04E35950F17E75`**
+- 归档校验 **45 项 0 问题**（校验脚本支持传 exe 路径）
+- `dist\` 里仍是上一版（sha `43CD14DA…`），**等实例关掉后换过去**
+
+## 79. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `ui_app.py` | 新增 `_quality_lines()`；`_download_done` 改用它（不再把请求档位当实际档位）；路径 normpath |
+| `lang_dev/_check_newui.py` | 新增 §7 共 6 项音质展示断言 |
+
 

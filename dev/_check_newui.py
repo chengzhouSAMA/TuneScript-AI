@@ -141,6 +141,25 @@ def main():
           '内容高 %s vs 视口 %s' % (pg._canvas.bbox('all')[3], pg._canvas.winfo_height()))
     root.withdraw()
 
+    print('\n=== 7) 音质展示：不能把「请求的档位」当成「实际拿到的」===')
+    fake = {'level': 'hires',
+            'resolve': {'level': 'exhigh', 'br': 320000, 'fmt': 'mp3',
+                        'downgraded': True},
+            'cookie': {'ok': True, 'nickname': '某人', 'vip_label': '黑胶 VIP'},
+            'reason': '请求 hires -> 实际 exhigh 320kbps mp3'}
+    joined = '\n'.join(ui_app._quality_lines(fake))
+    check('显示的是服务端实际给的档位（320kbps）', '音质：320kbps（320 kbps mp3）' in joined,
+          joined.split('\n')[0])
+    check('没有把 hires 说成"实际音质"', '音质：Hi-Res' not in joined)
+    check('明确写出被降级 + 原因', '只给了 320kbps' in joined and '需要黑胶会员' in joined)
+    check('带上账号状态', '已登录' in joined and '黑胶 VIP' in joined)
+    fake2 = {'level': 'exhigh',
+             'resolve': {'level': 'exhigh', 'br': 320000, 'fmt': 'mp3'},
+             'cookie': {'ok': False, 'reason': 'cookie 无效或已过期'}}
+    j2 = '\n'.join(ui_app._quality_lines(fake2))
+    check('没降级时不乱报警', '⚠️ 请求的是' not in j2, j2.replace('\n', ' | '))
+    check('未登录时说明原因', '未登录' in j2 and 'cookie 无效或已过期' in j2)
+
     if '--shot' in sys.argv:
         root.deiconify()
         shell.show('netease')
