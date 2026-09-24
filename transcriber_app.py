@@ -825,26 +825,29 @@ def transcribe_stems_enhanced(stems, model_path, progress, out_dir=None):
     vocal_line = [n for n in vocal_line if not _in_long_gap(n[0])]
     melody = _fill_melody_gaps(vocal_line, other_notes, gaps=gaps)
 
-    # 多和声音进左手：滤高音幻觉→抑长铺垫→抽稀(0.8s 一个和声点)，
-    # 左手只保留最突出的和声，密度低、干净
-    harmony = _sparsify_harmony(
-        _suppress_pad_notes(_filter_high_hallucination(other_notes)),
-        min_gap=0.8)
+    # R2：other 轨（电子音/合成器）单独识别一份，只并入无人声段。
+    # 「合并不是已经做了吗」—— 做了，但那条伴奏合并轨走的是「钢琴模型 +
+    # 钢琴向过滤器」：_filter_high_hallucination 会删掉所有「≥G5 且孤立」的音，
+    # 而合成器主音、尖锐 pluck 正是这种形状。所以这里给 other 单独过一次识别，
+    # 走放宽后的阈值并用在纯伴奏段。
+    _ab = _accomp_boost_params()
+    other_extra = None
+    if _ab['on'] and _ab['other'] and main_name != 'other':
+        _op = stems.get('other')
+        if _op and os.path.isfile(_op):
+            try:
+                other_extra = transcribe_notes(_op, bp_model, progress,
+                                               label='其他轨(电子音)', min_len=60)
+                progress('无人声段伴奏加强：other 轨单独识别 %d 个音，只并入纯伴奏段。'
+                         % len(other_extra))
+            except Exception as _oe:
+                progress('other 轨单独识别不可用(%s)，跳过。' % type(_oe).__name__)
+                other_extra = None
 
-    # 前奏/尾奏(空档)内只保留最突出的声音：再二次抽稀(1.5s 一个音)，
-    # 让器乐段极简，不抢主旋律
-    accomp = []
-    for n in harmony:
-        if _in_gap(n[0]):
-            accomp.append((n[0], n[1], n[2], int(n[3] * 0.85)))
-        else:
-            accomp.append(n)
-    if gaps:
-        gap_harmony = [n for n in accomp if _in_gap(n[0])]
-        keep = [n for n in accomp if not _in_gap(n[0])]
-        sparse = _sparsify_harmony(gap_harmony, min_gap=1.5)
-        accomp = keep + sparse
-        accomp.sort(key=lambda x: x[0])
+    # 多和声音进左手：有人声段保持原样（滤高音幻觉→抑长铺垫→抽稀 0.8s）；
+    # 无人声段按 R2 放宽阈值并并入 other 电子音
+    accomp = _build_accomp(other_notes, _in_gap, gaps, min_gap=0.8,
+                           halluc=True, extra=other_extra)
 
     midi_data, left, right = fuse_to_piano(melody, accomp)
     return midi_data, left, right
@@ -986,6 +989,8 @@ def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
 
     # 左右手音域分离：左手高音降八度，避免两手糊在一起
     left = _separate_hands(left, right_min=60)
+    # R1：再按时间窗强制拉开到整整一个八度（_separate_hands 只保证 1 个半音）
+    left, right, _gapst = _enforce_octave_gap(left, right)
 
     return _build_hands_midi(left, right), left, right
 
@@ -1348,6 +1353,7 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
     left = _fix_same_pitch_overlap(_dedupe_exact(left))
     right = _fix_same_pitch_overlap(_dedupe_exact(right))
     left = _separate_hands(left, right_min=60)  # 左右手音域分离
+    left, right, _gapst = _enforce_octave_gap(left, right)   # R1：拉到整整一个八度
     left = _soft_velocity(left, lo=40, hi=100)
     right = _soft_velocity(right, lo=50, hi=110)
     return _build_hands_midi(left, right), left, right
@@ -1374,6 +1380,245 @@ def _separate_hands(left, right_min=60):
         else:
             out.append((s, e, p, v))
     return out
+
+
+def _right_min_cells(right, hi_t, grid=0.02):
+    """把「每个时间格上右手的最低音」铺成一张表（R1 用）。
+
+    用格子而不是逐音两两比较：左右手各上千个音时，两两比较是百万级，
+    而格子法只跟时长成正比。格子取 20ms，比任何有音乐意义的间隔都细。
+    """
+    n = int(hi_t / grid) + 2
+    cells = [None] * n
+    for s, e, p, _v in right:
+        i0 = max(0, int(s / grid))
+        i1 = min(n - 1, int(e / grid))
+        for i in range(i0, i1 + 1):
+            if cells[i] is None or p < cells[i]:
+                cells[i] = p
+    return cells
+
+
+def _hand_gap_min(left, right, grid=0.02):
+    """重叠时刻上「右手最低音 − 左手最高音」的最小值（报告/验收用）。
+
+    只在同一时间格里同时有右手音与左手音时才比较。
+    返回 (最小值, 比较格数)；没有可比时刻返回 (None, 0)。
+    """
+    if not left or not right:
+        return None, 0
+    hi_t = max(max(e for _s, e, _p, _v in left),
+               max(e for _s, e, _p, _v in right))
+    n = int(hi_t / grid) + 2
+    r_min = _right_min_cells(right, hi_t, grid)
+    l_max = [None] * n
+    for s, e, p, _v in left:
+        i0 = max(0, int(s / grid))
+        i1 = min(n - 1, int(e / grid))
+        for i in range(i0, i1 + 1):
+            if l_max[i] is None or p > l_max[i]:
+                l_max[i] = p
+    best, cnt = None, 0
+    for i in range(n):
+        if r_min[i] is not None and l_max[i] is not None:
+            g = r_min[i] - l_max[i]
+            cnt += 1
+            if best is None or g < best:
+                best = g
+    return best, cnt
+
+
+def _left_max_cells(left, hi_t, grid=0.02):
+    """把「每个时间格上左手最高音」铺成一张表（R1 第二趟用）。"""
+    n = int(hi_t / grid) + 2
+    cells = [None] * n
+    for s, e, p, _v in left:
+        i0 = max(0, int(s / grid))
+        i1 = min(n - 1, int(e / grid))
+        for i in range(i0, i1 + 1):
+            if cells[i] is None or p > cells[i]:
+                cells[i] = p
+    return cells
+
+
+def _enforce_octave_gap(left, right, min_gap=12, floor=21, grid=0.02):
+    """R1 第 2 条：重叠时刻上「右手最低音 − 左手最高音」至少 min_gap 个半音。
+
+    人声在右手、伴奏在左手。`_separate_hands()` 只把左手压到 ≤59、右手 ≥60
+    （相差 **1** 个半音），两手音域仍然挨着，谱面与听感都会糊在一起；
+    这里把它拉到整整一个八度。
+
+    两趟（顺序不能反）：
+      **第一趟「压左手」**：对每个左手音，取与它重叠的右手最低音，整体下移
+      八度直到低于 (右手最低音 − min_gap)；低到 floor 就停手。
+      **第二趟「抬右手」**：第一趟触底仍不够的窗口，才把人声那侧升八度。
+      （左手怎么动都不改变右手，所以第一趟一趟就够；第二趟只补触底的漏。）
+
+    只改音高：不增删音、不改起止时间、不改力度。
+    `TS_HAND_GAP=0` 关闭，`TS_HAND_GAP_SEMI` / `TS_HAND_GAP_FLOOR` 可调。
+    floor 默认 21 = A0，钢琴最低键，再低就不是钢琴音域了。
+
+    返回 (新的左手, 新的右手, 统计 dict)。
+    """
+    st = {'on': True, 'moved': 0, 'octaves': 0, 'blocked': 0, 'raised': 0,
+          'raise_octaves': 0, 'gap_before': None, 'gap_after': None}
+    if os.environ.get('TS_HAND_GAP', '1') != '1' or not left or not right:
+        st['on'] = False
+        return left, right, st
+    try:
+        min_gap = int(os.environ.get('TS_HAND_GAP_SEMI', str(min_gap)))
+        floor = int(os.environ.get('TS_HAND_GAP_FLOOR', str(floor)))
+    except ValueError:
+        pass
+    hi_t = max(max(e for _s, e, _p, _v in left),
+               max(e for _s, e, _p, _v in right))
+    cells = _right_min_cells(right, hi_t, grid)
+    n = len(cells)
+    st['gap_before'] = _hand_gap_min(left, right, grid)[0]
+
+    # ---- 第一趟：压左手 ----
+    out = []
+    for s, e, p, v in left:
+        rgm = None
+        for i in range(max(0, int(s / grid)), min(n - 1, int(e / grid)) + 1):
+            c = cells[i]
+            if c is not None and (rgm is None or c < rgm):
+                rgm = c
+        if rgm is None:                     # 该左手音处右手没音 → 无从比较，不动
+            out.append((s, e, p, v))
+            continue
+        limit = rgm - min_gap
+        np_ = p
+        k = 0
+        while np_ > limit and np_ - 12 >= floor:
+            np_ -= 12
+            k += 1
+        if k:
+            st['moved'] += 1
+            st['octaves'] += k
+        # ⚠️ 「降了但没降够」也必须记 blocked —— 第一版只在 k==0 时记，
+        #    于是「降了几个八度、最后卡在 floor 上仍不达标」的窗口从没被
+        #    交给第二趟抬右手，monitoring/jiabin 就残留了 −1 半音。
+        if np_ > limit:
+            st['blocked'] += 1
+        out.append((s, e, np_, v))
+
+    # ---- 第二趟：触底的窗口改抬右手（人声那侧）----
+    new_right = right
+    if st['blocked']:
+        hi2 = max(max(e for _s, e, _p, _v in out),
+                  max(e for _s, e, _p, _v in right))
+        lcells = _left_max_cells(out, hi2, grid)
+        n2 = len(lcells)
+        new_right = []
+        for s, e, p, v in right:
+            lm = None
+            for i in range(max(0, int(s / grid)), min(n2 - 1, int(e / grid)) + 1):
+                c = lcells[i]
+                if c is not None and (lm is None or c > lm):
+                    lm = c
+            if lm is None:
+                new_right.append((s, e, p, v))
+                continue
+            req = lm + min_gap
+            np_ = p
+            k = 0
+            while np_ < req and np_ + 12 <= 96:
+                np_ += 12
+                k += 1
+            if k:
+                st['raised'] += 1
+                st['raise_octaves'] += k
+                new_right.append((s, e, np_, v))
+            else:
+                new_right.append((s, e, p, v))
+
+    st['gap_after'] = _hand_gap_min(out, new_right, grid)[0]
+    return out, new_right, st
+
+
+# ---------------------------------------------------------------------------
+# R2：无人声段（纯伴奏）加强伴奏识别
+# ---------------------------------------------------------------------------
+
+def _accomp_boost_params():
+    """R2「无人声段加强伴奏识别」的开关与阈值。
+
+    默认**开启**（这是 2026-09-20 起用户要求的编配行为）。
+    要回到 R2 之前的伴奏整理，设 `TS_ACCOMP_BOOST=0`（那时逐字节还原旧路径）。
+    """
+    return {
+        'on': os.environ.get('TS_ACCOMP_BOOST', '1') == '1',
+        # 无人声段的「长铺垫」抑制上限（旧值 0.7s；放宽到 1.6s 才留得住 synth pad）
+        'pad_len': float(os.environ.get('TS_ACCOMP_GAP_PAD', '1.6')),
+        # 无人声段的抽稀间隔相对倍率（0.5 = 密度翻倍）
+        'ratio': float(os.environ.get('TS_ACCOMP_GAP_RATIO', '0.5')),
+        # 是否单独识别 other 轨（电子音/合成器）并只并入无人声段
+        'other': os.environ.get('TS_ACCOMP_OTHER', '1') == '1',
+    }
+
+
+def _dedupe_near(notes, dt=0.06, dp=1):
+    """去掉「同音高、起音几乎同时」的重复音（并入 other 轨识别结果时用）。"""
+    out = []
+    for n in sorted(notes, key=lambda x: (x[0], x[2])):
+        dup = False
+        for m in reversed(out[-8:]):
+            if n[0] - m[0] > dt:
+                break
+            if abs(n[2] - m[2]) <= dp:
+                dup = True
+                break
+        if not dup:
+            out.append(n)
+    return out
+
+
+def _accomp_legacy(other_notes, in_gap, gaps, min_gap=0.8, halluc=True):
+    """R2 之前的伴奏整理（`TS_ACCOMP_BOOST=0` 时走这条，逐字节还原）。"""
+    base = _filter_high_hallucination(other_notes) if halluc else other_notes
+    harmony = _sparsify_harmony(_suppress_pad_notes(base), min_gap=min_gap)
+    accomp = [(n[0], n[1], n[2], int(n[3] * 0.85)) if in_gap(n[0]) else n
+              for n in harmony]
+    if gaps:
+        gap_harmony = [n for n in accomp if in_gap(n[0])]
+        keep = [n for n in accomp if not in_gap(n[0])]
+        accomp = keep + _sparsify_harmony(gap_harmony, min_gap=1.5)
+        accomp.sort(key=lambda x: x[0])
+    return accomp
+
+
+def _build_accomp(other_notes, in_gap, gaps, min_gap=0.8, halluc=True, extra=None):
+    """伴奏轨整理。
+
+    R2 之前（= `TS_ACCOMP_BOOST=0`）：
+        滤高音幻觉 → 抑长铺垫 → 抽稀；纯伴奏段再压低 15% 力度并二次抽稀(1.5s)。
+
+    第二段的「二次抽稀 + 压低力度」是为**不抢器乐主旋律**设计的，代价是把
+    无人声段本来就少的伴奏又削薄一半；而 `_filter_high_hallucination` 会删掉
+    所有「≥G5 且孤立」的音 —— 合成器主音、尖锐 pluck 正是这个形状。
+
+    R2 只改**无人声段**：不滤孤立高音、放宽长音抑制、抽稀更密，并把 other 轨
+    单独识别出来的音并进来。**有人声段逐字节不变。**
+    """
+    p = _accomp_boost_params()
+    if not p['on']:
+        return _accomp_legacy(other_notes, in_gap, gaps,
+                              min_gap=min_gap, halluc=halluc)
+    sung = [n for n in other_notes if not in_gap(n[0])]
+    instr = [n for n in other_notes if in_gap(n[0])]
+    base = _filter_high_hallucination(sung) if halluc else sung
+    a = _sparsify_harmony(_suppress_pad_notes(base), min_gap=min_gap)
+    b = _sparsify_harmony(_suppress_pad_notes(instr, max_len=p['pad_len']),
+                          min_gap=max(0.05, min_gap * p['ratio']))
+    if extra:
+        # extra（other 轨单独识别）要先抽稀再并 —— 它是**原始识别输出**，
+        # 密度可达 20+ 音/秒，直接倒进去会把无人声段灌爆。
+        ex = [n for n in extra if in_gap(n[0])]
+        if ex:
+            b = _dedupe_near(
+                b + _sparsify_harmony(ex, min_gap=max(0.05, min_gap * p['ratio'])))
+    return sorted(a + b, key=lambda x: x[0])
 
 
 def _denoise_left(notes, vel_floor_pct=25, max_len=0.18):
@@ -2184,21 +2429,25 @@ def transcribe_stems(stems, model_path, progress, out_dir=None):
     vocal_notes = _dejitter_melody(vocal_notes)
     melody = _fill_melody_gaps(vocal_notes, other_notes, gaps=gaps)
 
-    # 多和声音进左手：抑制长铺垫 → 抽稀(0.9s 一个和声点)，密度低、干净
-    harmony = _sparsify_harmony(_suppress_pad_notes(other_notes), min_gap=0.9)
-    accomp = []
-    for n in harmony:
-        if _in_gap(n[0]):
-            # 间奏段的和声更轻，避免盖过器乐主旋律
-            accomp.append((n[0], n[1], n[2], int(n[3] * 0.85)))
-        else:
-            accomp.append(n)
-    if gaps:
-        gap_harmony = [n for n in accomp if _in_gap(n[0])]
-        keep = [n for n in accomp if not _in_gap(n[0])]
-        sparse = _sparsify_harmony(gap_harmony, min_gap=1.5)
-        accomp = keep + sparse
-        accomp.sort(key=lambda x: x[0])
+    # R2：other 轨（电子音/合成器）单独识别一份，只并入无人声段（同 enhanced 路径）
+    _ab = _accomp_boost_params()
+    other_extra = None
+    if _ab['on'] and _ab['other'] and _mn != 'other':
+        _op = stems.get('other')
+        if _op and os.path.isfile(_op):
+            try:
+                other_extra = notes_of(_op, '其他轨(电子音)', min_len=60)
+                progress('无人声段伴奏加强：other 轨单独识别 %d 个音，只并入纯伴奏段。'
+                         % len(other_extra))
+            except Exception as _oe:
+                progress('other 轨单独识别不可用(%s)，跳过。' % type(_oe).__name__)
+                other_extra = None
+
+    # 多和声音进左手：有人声段保持原样（抑长铺垫→抽稀 0.9s）；
+    # 无人声段按 R2 放宽阈值并并入 other 电子音
+    # 注意本路径不做 _filter_high_hallucination（沿旧行为，halluc=False）
+    accomp = _build_accomp(other_notes, _in_gap, gaps, min_gap=0.9,
+                           halluc=False, extra=other_extra)
     midi_data, left, right = fuse_to_piano(melody, accomp)
     return midi_data, left, right
 
@@ -2991,6 +3240,34 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
             os.remove(wav_for_bp)
         except OSError:
             pass
+
+    # ---- R1 最终保证：t6「人声接入」与 t11「右手补音」都会往右手加音， ----
+    #      加进来的音可能低于左手最高音，把「一个八度」重新破坏掉。
+    #      放在**所有取舍判据之后**：R1 是硬性编配要求，不参与 sim 取舍，
+    #      只在真的动了音高时才重渲染一次（没动就完全不加成本）。
+    try:
+        _lgap, _rgap, _gst = _enforce_octave_gap(left, right)
+        if _gst.get('moved') or _gst.get('raised'):
+            left, right = _lgap, _rgap
+            _gnb = max(_total_bars(left, tempo), _total_bars(right, tempo))
+            _gm = _build_hands_midi(left, right)
+            _gm.write(midi_path)
+            write_grand_staff_xml(left, right, xml_path, bpm=tempo,
+                                  n_bars=_gnb, splice=splice)
+            pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path, left, right,
+                                         tempo, base, out_dir, progress,
+                                         n_bars=_gnb, splice=splice)
+            render_wav(ms_exe, midi_path, out_wav, progress)
+            _gk = _melody_similarity(decoded, out_wav)
+            if _gk:
+                sim = _gk[1]
+            progress('音域分离：左手 %d 个音下移八度（共 %d 个），右手 %d 个音升八度'
+                     '（共 %d 个），右手最低音 − 左手最高音 %s → %s 半音（目标 ≥12）。'
+                     % (_gst['moved'], _gst['octaves'],
+                        _gst['raised'], _gst['raise_octaves'],
+                        _gst['gap_before'], _gst['gap_after']))
+    except Exception as _e5:
+        progress('音域分离不可用(%s)，保留原结果。' % type(_e5).__name__)
 
     results = {'midi': midi_path, 'pdf': pdf_paths, 'wav': out_wav}
     if stems:

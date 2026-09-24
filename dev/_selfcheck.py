@@ -78,22 +78,45 @@ def main():
         print("     最近备份：%s" % last_name)
         print("     diff：%d hunk / +%d / -%d" % (hunks, len(adds), len(dels)))
         joined = "".join(adds)
-        check("自上次备份以来包含本轮声明的 netease 接入",
-              "netease" in joined, "新增 %d 行" % len(adds))
-        check("新增行数在理智范围内（<=250；仅防意外大改，不是预算）",
-              len(adds) <= 250, "新增 %d 行" % len(adds))
+        check("自上次备份以来包含本轮声明的 R1/R2 实现",
+              "_enforce_octave_gap" in joined and "_build_accomp" in joined,
+              "新增 %d 行" % len(adds))
+        check("新增行数在理智范围内（<=400；仅防意外大改，不是预算）",
+              len(adds) <= 400, "新增 %d 行" % len(adds))
         known_del = ("notes_of(stems['vocals']", "请选择音频文件", "需提供 --audio 或 --bvid",
                      "B站音频与转谱产物", "args=(audio, bvid, outdir)",
                      "def _worker(self, audio, bvid, outdir)", "填 BV 号则自动下载后转谱",
                      "style='CardMuted.TLabel').grid(row=3",   # BV 提示行的续行
                      "if not audio and not bvid:",             # 输入校验（已扩成三路）
                      "ap.add_argument('--outdir', required=True)")  # 登录子命令不需要 outdir
-        # 删掉**纯注释行**不可能改变行为，所以一律放行；
+        # 本轮（R1/R2）：两处旧伴奏整理被整体换成 _build_accomp 调用。
+        # 它们在 transcribe_stems_enhanced 与 transcribe_stems 里各出现一次，
+        # 代码结构逐行相同，所以这里按「行内容」而不是按位置登记。
+        known_del += (
+            "harmony = _sparsify_harmony(",
+            "_suppress_pad_notes(_filter_high_hallucination(other_notes)),",
+            "min_gap=0.8)",
+            "harmony = _sparsify_harmony(_suppress_pad_notes(other_notes), min_gap=0.9)",
+            "accomp = []",
+            "for n in harmony:",
+            "if _in_gap(n[0]):",
+            "accomp.append((n[0], n[1], n[2], int(n[3] * 0.85)))",
+            "else:",
+            "accomp.append(n)",
+            "if gaps:",
+            "gap_harmony = [n for n in accomp if _in_gap(n[0])]",
+            "keep = [n for n in accomp if not _in_gap(n[0])]",
+            "sparse = _sparsify_harmony(gap_harmony, min_gap=1.5)",
+            "accomp = keep + sparse",
+            "accomp.sort(key=lambda x: x[0])",
+        )
+        # 删掉**纯注释行或空行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。
         # 注意 difflib 的删除行首还带一个 '-'，判断注释前要先剥掉。
-        ok_del = all(l[1:].strip().startswith("#") or any(k in l for k in known_del)
+        ok_del = all(not l[1:].strip() or l[1:].strip().startswith("#")
+                     or any(k in l for k in known_del)
                      for l in dels)
-        check("被删/改的行要么是注释、要么属于已知旧实现", ok_del, "%d 行" % len(dels))
+        check("被删/改的行要么是注释/空行、要么属于已知旧实现", ok_del, "%d 行" % len(dels))
     else:
         check("找到备份链", False, "备份目录里没有 transcriber_app.py")
 
@@ -101,8 +124,8 @@ def main():
     if os.path.isfile(anchor):
         _h, adds_all, dels_all = _diff(anchor, p)
         print("     累计（相对 V0.5 出货）：+%d / -%d" % (len(adds_all), len(dels_all)))
-        check("累计新增在理智范围内（<=400）", len(adds_all) <= 400, "+%d" % len(adds_all))
-        check("累计删除在理智范围内（<=20）", len(dels_all) <= 20, "-%d" % len(dels_all))
+        check("累计新增在理智范围内（<=700）", len(adds_all) <= 700, "+%d" % len(adds_all))
+        check("累计删除在理智范围内（<=80）", len(dels_all) <= 80, "-%d" % len(dels_all))
     import ast as _ast
     try:
         _ast.parse(open(p, encoding="utf-8").read())
@@ -373,6 +396,57 @@ def main():
     os.environ["TS_LANG_SEG"] = "1"
     check("TS_LANG_SEG=1 → enabled()=True", lp.enabled() is True)
     os.environ.pop("TS_LANG_SEG", None)
+
+    print("=== [12] R1 人声右手 / 与伴奏差一个八度 ===")
+    import transcriber_app as TA
+    _r = [(0.0, 1.0, 64, 80)]
+    _l = [(0.0, 1.0, 60, 80)]
+    check("默认开启（TS_HAND_GAP 未设）",
+          TA._enforce_octave_gap(_l, _r)[2]["on"] is True)
+    _lo, _ro, _st = TA._enforce_octave_gap(_l, _r)
+    check("重叠窗上拉到 ≥12 半音", _st["gap_after"] >= 12,
+          "%s → %s" % (_st["gap_before"], _st["gap_after"]))
+    check("只改音高：数量/时间/力度守恒",
+          len(_lo) == len(_l) and (_lo[0][0], _lo[0][1], _lo[0][3]) == (0.0, 1.0, 80))
+    # _separate_hands 的边界：左手 59 原样留下、右手 60 → 只差 1 个半音
+    _l59 = [(0.0, 1.0, 59, 80)]
+    _r60 = [(0.0, 1.0, 60, 80)]
+    check("原有的 _separate_hands 最小只给 1 个半音（所以必须有 R1）",
+          TA._hand_gap_min(TA._separate_hands(_l59, 60), _r60)[0] == 1,
+          TA._hand_gap_min(TA._separate_hands(_l59, 60), _r60)[0])
+    check("R1 把它补到 ≥12",
+          TA._enforce_octave_gap(_l59, _r60)[2]["gap_after"] >= 12)
+    # 「降了但没降够」也必须算 blocked，否则第二趟抬右手不会启动
+    _o2, _r2, _s2 = TA._enforce_octave_gap([(0.0, 1.0, 45, 80)],
+                                           [(0.0, 1.0, 32, 80)])
+    check("触底时改抬右手，间隔仍达标",
+          _s2["blocked"] >= 1 and _s2["gap_after"] >= 12,
+          "blocked=%s after=%s" % (_s2["blocked"], _s2["gap_after"]))
+    os.environ["TS_HAND_GAP"] = "0"
+    check("TS_HAND_GAP=0 → 完全不动",
+          TA._enforce_octave_gap(_l, _r)[0] == _l)
+    os.environ.pop("TS_HAND_GAP", None)
+
+    print("=== [13] R2 无人声段加强伴奏（含 other 电子音）===")
+    _p = TA._accomp_boost_params()
+    check("R2 默认开启", _p["on"] is True)
+    check("other 单独识别默认开启", _p["other"] is True)
+    _in_gap = lambda t: 10.0 <= t < 20.0
+    _raw = [(12.0, 12.4, 84, 90), (12.5, 12.9, 60, 70), (13.0, 13.4, 64, 70)]
+    _old = TA._accomp_legacy(_raw, _in_gap, [(10.0, 20.0)], min_gap=0.8, halluc=True)
+    check("旧路径会删掉无人声段的孤立高音（电子音的形状）",
+          not any(n[2] == 84 for n in _old))
+    _new = TA._build_accomp(_raw, _in_gap, [(10.0, 20.0)], min_gap=0.8, halluc=True)
+    check("R2 保住孤立高音", any(n[2] == 84 for n in _new))
+    check("有人声段与旧路径逐字节相同",
+          TA._build_accomp([(1.0, 1.4, 60, 70), (1.5, 1.9, 64, 70)],
+                           lambda t: False, [], min_gap=0.8, halluc=True)
+          == TA._accomp_legacy([(1.0, 1.4, 60, 70), (1.5, 1.9, 64, 70)],
+                               lambda t: False, [], min_gap=0.8, halluc=True))
+    os.environ["TS_ACCOMP_BOOST"] = "0"
+    check("TS_ACCOMP_BOOST=0 → 逐字节还原旧路径",
+          TA._build_accomp(_raw, _in_gap, [(10.0, 20.0)], min_gap=0.8, halluc=True) == _old)
+    os.environ.pop("TS_ACCOMP_BOOST", None)
 
     n_bad = sum(1 for _n, ok, _d in RESULTS if not ok)
     print("\n=== 汇总：%d 项，%d 通过，%d 失败 ===" % (len(RESULTS), len(RESULTS) - n_bad, n_bad))
