@@ -64,6 +64,14 @@ def main():
     check('网易云页有 搜索按钮 + 结果表 + 下载按钮',
           hasattr(np_, 'search_btn') and hasattr(np_, 'tv') and hasattr(np_, 'dl_btn'))
     check('网易云页有 登录/退出入口', hasattr(np_, 'refresh_account'))
+    check('网易云页有 cookie 输入栏（Entry + 保存/载入）',
+          hasattr(np_, 'cookie_bar') and hasattr(np_.cookie_bar, 'entry')
+          and hasattr(np_.cookie_bar, 'save') and hasattr(np_.cookie_bar, 'load'))
+    check('转谱页有跳去 cookie 的入口', hasattr(tp, 'ne_entry'))
+    check('cookie 脱敏不回显完整值',
+          ui_app._mask('MUSIC_U=0123456789abcdef; appver=1;') ==
+          'MUSIC_U=012345…cdef（16 字符，共 2 个字段）',
+          ui_app._mask('MUSIC_U=0123456789abcdef; appver=1;'))
     check('B站页有 BV 输入 + 获取按钮',
           hasattr(shell.pages['bilibili'], 'bv_var') and hasattr(shell.pages['bilibili'], 'go_btn'))
     lp = shell.pages['lyrics']

@@ -20,6 +20,8 @@
 import json
 import os
 import sys
+import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -38,6 +40,107 @@ def _artists(v):
     if isinstance(v, (list, tuple)):
         return ' / '.join(str(x) for x in v if x)
     return str(v or '')
+
+
+def _copy_to_clipboard(widget, text):
+    """把文本放进剪贴板（扫不动二维码时，可以把链接发到手机打开）。"""
+    try:
+        if not text:
+            messagebox.showinfo('还没有二维码', '二维码还没取到，稍等一下再点。')
+            return
+        widget.clipboard_clear()
+        widget.clipboard_append(text)
+        messagebox.showinfo('已复制', '扫码链接已复制，可以发到手机上打开：\n\n%s' % text)
+    except Exception as e:
+        messagebox.showerror('复制失败', str(e))
+
+
+def _mask(cookie):
+    """cookie 的脱敏摘要 —— **绝不回显完整 cookie**，但要够用户确认是不是那一串。"""
+    if not cookie:
+        return '（空）'
+    parts = {}
+    for seg in str(cookie).split(';'):
+        if '=' in seg:
+            k, v = seg.split('=', 1)
+            parts[k.strip()] = v.strip()
+    mu = parts.get('MUSIC_U') or ''
+    if not mu:
+        return '没有 MUSIC_U 字段（%d 个字段）' % len(parts)
+    tail = ('…%s' % mu[-4:]) if len(mu) > 10 else ''
+    return 'MUSIC_U=%s%s（%d 字符，共 %d 个字段）' % (mu[:6], tail, len(mu), len(parts))
+
+
+class CookieBar:
+    """可复用的「cookie 输入」一行：输入框 + 保存 / 载入当前 / 清空。
+
+    写的是 `netease_login.save_cookie()` 那条路（= `netease_cookie.txt`，
+    exe 同目录），和扫码登录、环境变量共用同一套读取逻辑。
+    """
+
+    def __init__(self, parent, page, on_saved=None):
+        self.page = page
+        self.on_saved = on_saved
+        self.var = tk.StringVar()
+        g = K.form(parent)
+        ttk.Label(g, text='cookie 输入', style='NCard.TLabel').grid(
+            row=0, column=0, sticky='w', pady=(4, 0))
+        self.entry = ttk.Entry(g, textvariable=self.var, width=52)
+        self.entry.grid(row=0, column=1, padx=6, pady=(4, 0), sticky='ew')
+        btns = tk.Frame(g, bg=K.N_CARD)
+        btns.grid(row=0, column=2, pady=(4, 0))
+        ttk.Button(btns, text='保存', style='NSecond.TButton',
+                   command=self.save).pack(side='left')
+        ttk.Button(btns, text='载入当前', style='NSecond.TButton',
+                   command=self.load).pack(side='left', padx=4)
+        ttk.Button(btns, text='清空', style='NGhost.TButton',
+                   command=lambda: self.var.set('')).pack(side='left')
+        ttk.Label(g, text='把 MUSIC_U=… 那一段（带不带引号都行、分号可留可去）粘进来点保存即可；'
+                          '保存后写进 netease_cookie.txt。'
+                          '优先级：环境变量 TS_NETEASE_COOKIE ＞ 这个文件 ＞ 打包时烤入的值。',
+                  style='NCardMuted.TLabel', wraplength=740, justify='left').grid(
+            row=1, column=0, columnspan=3, sticky='w', pady=(4, 0))
+
+    def save(self):
+        txt = self.var.get().strip()
+        if not txt:
+            messagebox.showwarning('提示', '请先把 cookie 粘进来。')
+            return
+        try:
+            import netease_login as NL
+            path = NL.save_cookie(txt)
+        except Exception as e:
+            messagebox.showerror('保存失败', str(e))
+            return
+        try:
+            import netease_login as NL
+            src = NL.cookie_source()
+        except Exception:
+            src = '?'
+        self.page.log('✅ cookie 已保存：%s' % path)
+        self.page.log('   内容 %s；当前生效来源 = %s' % (_mask(txt), src))
+        if src == 'env':
+            self.page.log('   ⚠️ 环境变量 TS_NETEASE_COOKIE 优先级更高，'
+                          '文件已写好但暂时不生效 —— 清掉环境变量或重启后才会用它。')
+        self.var.set('')
+        if self.on_saved:
+            self.on_saved()
+
+    def load(self):
+        try:
+            import netease_login as NL
+            v = NL.load_cookie()
+            src = NL.cookie_source()
+        except Exception as e:
+            messagebox.showerror('读取失败', str(e))
+            return
+        if not v:
+            messagebox.showinfo('没有 cookie',
+                                '当前既没有环境变量，也没有 netease_cookie.txt。')
+            return
+        self.var.set(v)
+        self.page.log('已载入当前 cookie（来源 %s，%s）—— 可以直接改完再保存。'
+                      % (src, _mask(v)))
 
 
 def _table(parent, columns, height=6):
@@ -61,6 +164,15 @@ def _table(parent, columns, height=6):
 # 网易云扫码登录（独立弹窗，供「网易云」页调用）
 # ---------------------------------------------------------------------------
 def qr_login_dialog(parent, on_success=None):
+    """扫码登录窗口：二维码 + **过期自动换新** + 轮询状态日志。
+
+    实测（`dev/_probe_qr_ttl.py`）：没人扫的时候服务端一直返回 801（等待扫码），
+    只有真的放太久才会返回 800（过期）。所以这里**过期就自动换一张**，
+    不再让用户"关掉重开"；同时把每次轮询的原始返回码写进小日志，
+    真出问题能一眼看出是哪一步不对（而不只是"过期"三个字）。
+
+    扫码这条路不通时，上一页的「cookie 输入」可以手工粘贴 —— 两条路等价。
+    """
     try:
         import netease_login as NL
     except Exception as e:
@@ -77,11 +189,30 @@ def qr_login_dialog(parent, on_success=None):
     win.configure(bg=K.N_BG)
     win.transient(parent)
     win.resizable(False, False)
+
     cv = tk.Canvas(win, width=260, height=260, bg='white', highlightthickness=0)
-    cv.pack(padx=18, pady=(18, 8))
+    cv.pack(padx=18, pady=(18, 6))
     st = tk.StringVar(value='正在获取二维码…')
-    ttk.Label(win, textvariable=st, style='N.TLabel', wraplength=280,
-              justify='center').pack(padx=18, pady=(0, 16))
+    ttk.Label(win, textvariable=st, style='N.TLabel', wraplength=300,
+              justify='center').pack(padx=18)
+    log = tk.Text(win, height=5, width=42, bg='#fbfcfe', fg=K.N_MUTED, relief='flat',
+                  highlightthickness=1, highlightbackground=K.N_BORDER,
+                  font=('Consolas', 8), wrap='word')
+    log.pack(padx=18, pady=(8, 6))
+    log.configure(state='disabled')
+    bar = tk.Frame(win, bg=K.N_BG)
+    bar.pack(padx=18, pady=(0, 16))
+
+    state = {'unikey': None, 't0': 0.0, 'gen': 0}
+
+    def add_log(line):
+        try:
+            log.configure(state='normal')
+            log.insert('end', line + '\n')
+            log.see('end')
+            log.configure(state='disabled')
+        except Exception:
+            pass
 
     def draw(matrix):
         cv.delete('all')
@@ -95,46 +226,93 @@ def qr_login_dialog(parent, on_success=None):
                                         off + (x + 1) * cell, off + (y + 1) * cell,
                                         fill='black', outline='')
 
-    def poll(unikey):
-        if not win.winfo_exists():
+    def new_qr():
+        """取一张新二维码。gen 是代次，旧的轮询回来会被丢掉。"""
+        state['gen'] += 1
+        gen = state['gen']
+        st.set('正在获取二维码…')
+        cv.delete('all')
+
+        def work():
+            try:
+                unikey, msg = NL.generate_qr_key()
+            except Exception as e:
+                unikey, msg = None, '获取二维码失败：%s: %s' % (type(e).__name__, e)
+            try:
+                win.after(0, lambda: apply(gen, unikey, msg))
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply(gen, unikey, msg):
+        if gen != state['gen'] or not win.winfo_exists():
+            return
+        if not unikey:
+            st.set('%s\n（点「刷新二维码」重试；也可以回到上一页用 cookie 输入粘）' % msg)
+            add_log('取 key 失败：%s' % msg)
+            return
+        state['unikey'] = unikey
+        state['t0'] = time.time()
+        try:
+            draw(NL.qr_matrix(NL.qr_url(unikey)))
+        except Exception as e:
+            st.set('生成二维码图片失败：%s' % type(e).__name__)
+            add_log('画二维码失败：%s' % e)
+            return
+        st.set('请用网易云音乐 App 扫码（没人扫就一直有效，真过期会自动换新的）')
+        add_log('新二维码 %s' % unikey)
+        win.after(1500, lambda: poll(gen, unikey))
+
+    def poll(gen, unikey):
+        if gen != state['gen'] or not win.winfo_exists():
             return
         try:
             code, cookie, msg = NL.poll_qr_key(unikey)
         except Exception as e:
-            st.set('轮询失败（%s），重试中…' % type(e).__name__)
-            win.after(2500, lambda: poll(unikey))
+            st.set('轮询失败（%s），2.5 秒后重试…' % type(e).__name__)
+            add_log('轮询异常：%s' % e)
+            win.after(2500, lambda: poll(gen, unikey))
             return
-        st.set(msg)
+        el = time.time() - state['t0']
         if code == NL.ST_OK and cookie:
             try:
                 NL.save_cookie(cookie)
                 st.set('登录成功，已保存到 netease_cookie.txt')
+                add_log('code=803 登录成功；cookie %s' % _mask(cookie))
                 if on_success:
                     on_success()
             except Exception as e:
-                st.set('登录成功但保存失败：%s' % e)
+                st.set('登录成功，但保存失败：%s' % e)
+                add_log('code=803 但保存失败：%s' % e)
             win.after(1500, win.destroy)
             return
         if code == NL.ST_EXPIRED:
-            st.set('二维码已过期，请关掉重开')
+            add_log('%5.1fs code=800 过期 → 自动换新' % el)
+            st.set('这张过期了，正在换一张…')
+            win.after(300, new_qr)
             return
-        win.after(2000, lambda: poll(unikey))
+        if code == NL.ST_SCANNED:
+            st.set('已扫码，请在手机上确认')
+            add_log('%5.1fs code=802 已扫码待确认' % el)
+        elif code == NL.ST_WAIT:
+            st.set('等待扫码…（已 %d 秒）' % int(el))
+            if int(el) % 20 < 2:                 # 20 秒打一行心跳，别刷屏
+                add_log('%5.1fs code=801 等待扫码' % el)
+        else:
+            st.set(msg)
+            add_log('%5.1fs code=%s %s' % (el, code, msg))
+        win.after(2000, lambda: poll(gen, unikey))
 
-    def fetch():
-        try:
-            unikey, msg = NL.generate_qr_key()
-        except Exception as e:
-            win.after(0, lambda: st.set('获取二维码失败：%s' % type(e).__name__))
-            return
-        if not unikey:
-            win.after(0, lambda: st.set(msg))
-            return
-        m = NL.qr_matrix(NL.qr_url(unikey))
-        win.after(0, lambda: (draw(m), st.set('请用网易云音乐 App 扫码')))
-        win.after(500, lambda: poll(unikey))
+    ttk.Button(bar, text='刷新二维码', style='NSecond.TButton',
+               command=new_qr).pack(side='left')
+    ttk.Button(bar, text='复制扫码链接', style='NSecond.TButton',
+               command=lambda: _copy_to_clipboard(win, NL.qr_url(state['unikey'] or ''))
+               ).pack(side='left', padx=6)
+    ttk.Button(bar, text='关闭', style='NGhost.TButton',
+               command=win.destroy).pack(side='left')
 
-    import threading
-    threading.Thread(target=fetch, daemon=True).start()
+    new_qr()
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +336,9 @@ class TranscribePage(Page):
                                  kinds=K.AUDIO_TYPES)
         self.bvid_entry = field(g, 2, 'B站 BV 号', self.bvid_var)
         self.ne_entry = field(g, 3, '网易云搜索', self.ne_var)
+        ttk.Button(g, text='cookie…', style='NSecond.TButton',
+                   command=lambda: self.app.show('netease')).grid(row=3, column=2,
+                                                                  pady=(6, 0))
         self.outdir_entry = field(g, 4, '输出目录', self.outdir_var, 'dir')
 
         _o2, c2 = card(self.body)
@@ -276,8 +457,10 @@ class NeteasePage(Page):
         section(c, '账号', '免登录一般到 320kbps；欧美版权曲可能只给 30~45 秒试听。')
         ttk.Label(c, textvariable=self.status_var, style='NCard.TLabel',
                   wraplength=760, justify='left').pack(anchor='w', pady=(0, 6))
+        # cookie 手动输入：扫码不好用（或想直接换号）时的正路
+        self.cookie_bar = CookieBar(c, self, on_saved=self.refresh_account)
         row = tk.Frame(c, bg=K.N_CARD)
-        row.pack(anchor='w')
+        row.pack(anchor='w', pady=(8, 0))
         ttk.Button(row, text='刷新状态', style='NSecond.TButton',
                    command=self.refresh_account).pack(side='left')
         ttk.Button(row, text='扫码登录…', style='NSecond.TButton',
@@ -842,7 +1025,10 @@ class Shell:
         except Exception:
             pass
 
-        self.show('transcribe')
+        # 初始页：默认「转谱」；`TS_UI_PAGE=netease` 可直接开在某页（截图/录屏/自检用）
+        want = os.environ.get('TS_UI_PAGE', '').strip().lower()
+        keys = [k for k, _l, _c in NAV]
+        self.show(want if want in keys else 'transcribe')
 
     @staticmethod
     def _bundle_dir():

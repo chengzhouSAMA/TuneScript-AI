@@ -1273,4 +1273,115 @@ ui_app.py    Shell（左侧导航 + 右侧页面）+ 6 个功能页 + 扫码登�
 | `lang_dev/_verify_exe.py` | 模块层加两个新模块；脚本层加 `ui_app` |
 | `README.md` | 新增「界面」一节 + 两个环境变量 + 文件说明 |
 
+---
+---
+
+# 第九部分：cookie 输入栏 + 扫码「一直说过期」
+
+> 主人原话：**「为网易云搜索模式添加一个输入 cookie 的输入栏」**、
+> **「且扫码登陆时一直显示二维码过期」**。
+
+## 56. 先查「一直显示二维码过期」：服务端实测二维码有效 **301 秒**
+
+不猜，直接把每一步的原始返回打出来（`lang_dev/_probe_qr_login.py`）：
+
+```
+unikey  : /api/login/qrcode/unikey         -> https://interface3.music.163.com/eapi/login/qrcode/unikey
+qrlogin : /api/login/qrcode/client/login   -> https://interface3.music.163.com/eapi/login/qrcode/client/login
+
+取 unikey(type=1) → {"code": 200, "unikey": "9fbf0f82-…"}
+连续轮询 6 次     → {"code": 801, "message": "等待扫码"} × 6
+```
+
+再跑一次长轮询（`lang_dev/_probe_qr_ttl.py --minutes 6`）：
+
+```
+[   0.2s] 仍在等待扫码(801)
+...
+[ 240.6s] 仍在等待扫码(801)
+[ 301.4s] code=800  {"code": 800, "message": "二维码不存在或已过期"}
+出现过的 code： {801: 138, 800: 1}
+首次 800 的时间：301.4s
+```
+
+**结论：接口和加密都是对的，二维码压根不是"一开就过期"，而是安安稳稳有效 ~5 分钟**
+（138 次轮询全是 801）。所以主人看到的"一直过期"，成因是——
+**超过 5 分钟才扫到**（翻手机、开 App、找扫一扫），而旧代码一遇到 800 就
+`st.set('二维码已过期，请关掉重开')` 然后 `return` **停止轮询**，界面就永远停在
+"已过期"上了。看代码像是"过期"，其实是**它不再刷新了**。
+
+### 56.1 改法：过期就自动换一张 + 过程可见
+
+- `ui_app.qr_login_dialog` 重写：800 → **自动取新二维码**（`gen` 代次号保证旧轮询的
+  回调不会覆盖新图），不再让用户"关掉重开"。
+- 加「刷新二维码」按钮，随时手动换。
+- 状态栏带**已等待秒数**，能直观看到 5 分钟的窗口。
+- 加一块小日志，把 `code=801/802/803/800` 原样写出来 ——
+  下次真出问题，一眼能看出卡在哪一步，而不是只看到"过期"两个字。
+- 加「复制扫码链接」：扫不动时可以把 `https://music.163.com/login?codekey=…`
+  发到手机打开。
+- 旧版界面（`App._netease_login`）也做了同样的最小修复：800 → `win.after(300, fetch)`
+  自动重取，而不是停摆。
+
+## 57. cookie 输入栏
+
+新增 `ui_app.CookieBar`（可复用的一行），放在**「网易云」页的账号卡片**里：
+
+```
+cookie 输入  [ MUSIC_U=…                    ]  [保存] [载入当前] [清空]
+把 MUSIC_U=… 那一段（带不带引号都行、分号可留可去）粘进来点保存即可；
+保存后写进 netease_cookie.txt。
+优先级：环境变量 TS_NETEASE_COOKIE ＞ 这个文件 ＞ 打包时烤入的值。
+```
+
+- 「保存」走 `netease_login.save_cookie()` —— 和扫码登录写的是**同一个文件**，
+  读取逻辑完全共用（环境变量 → exe 同目录 `netease_cookie.txt` → 烤入值）。
+- 保存后如果发现**生效来源是 `env`**，会明确提示"环境变量优先级更高，
+  文件已写好但暂时不生效"，不让用户以为存了没用。
+- 「载入当前」把当前生效的 cookie 填进输入框，方便改完再存。
+- **日志只打脱敏摘要**（`MUSIC_U=1eb9ce…5d70（63 字符，共 2 个字段）`），
+  **绝不回显完整 cookie**。
+- 「转谱」页的**网易云搜索**那一行右侧加了一个「cookie…」按钮，一步跳到本页
+  —— 那里也是"网易云搜索模式"，不给第二套重复 UI。
+
+## 58. 验证
+
+| 项 | 结果 |
+|---|---|
+| `lang_dev/_check_newui.py` | **31/31**（新增：cookie 输入栏存在、脱敏格式正确） |
+| `lang_dev/_selfcheck.py` | **81/81** |
+| `lang_dev/_check_gui.py` | 0 问题 |
+| `lang_dev/_verify_exe.py` | **39/39** —— 内容层新增 4 项：`CookieBar` / `TS_UI_PAGE` / `TS_UI_GEOMETRY` / `_mask` |
+| 冻结态实跑 + 截图 OCR | 网易云页确实出现「cookie 输入」行与提示文字（截图 `lang_dev/_ui_cookie.png`） |
+
+新增的两个**调试/验证用**环境变量（真开窗截图靠它们才能直接开在指定页）：
+
+```
+TS_UI_PAGE=netease        直接开在「网易云」页
+TS_UI_GEOMETRY=1120x740+10+10   钉死窗口位置
+```
+
+## 59. 出货 exe（本轮）
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 574,362,767 B（547.8 MB） |
+| sha256 | `727BAAB2234CFEE935795DD5B59463371F93F138E67E428D85EF2073BD2C7067` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `490D269A…`） |
+| 归档校验 | 39 项，0 问题 |
+
+## 60. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `ui_app.py` | 新增 `CookieBar` / `_mask` / `_copy_to_clipboard`；`qr_login_dialog` 重写（自动换码 + 状态日志 + 刷新/复制按钮）；`NeteasePage` 挂 cookie 栏；`TranscribePage` 加「cookie…」跳转；`Shell` 支持 `TS_UI_PAGE` |
+| `transcriber_app.py` | 旧版扫码弹窗：`ST_EXPIRED` 从"关掉重开"改成自动重取 |
+| `lang_dev/_probe_qr_login.py` | **新增**：单步联调，打印原始返回 |
+| `lang_dev/_probe_qr_ttl.py` | **新增**：长轮询测二维码真实有效期 |
+| `lang_dev/_check_newui.py` | +3 项 cookie 相关断言 |
+| `lang_dev/_verify_exe.py` | 内容层加 4 项 UI 关键件 |
+| `lang_dev/_selfcheck.py` | 登记本轮删除行为"已知旧实现" |
+| `README.md` | cookie 一节补「也可以直接在界面里填」 |
+
 

@@ -3570,7 +3570,10 @@ class App:
                 win.after(1500, win.destroy)
                 return
             if code == NL.ST_EXPIRED:
-                st.set('二维码已过期，请关掉重开')
+                # 服务端实测：没人扫时二维码有效期约 5 分钟，之后返回 800。
+                # 旧版这里让用户"关掉重开"，体验上就像是"一直过期" —— 改成自动换一张。
+                st.set('二维码已过期，正在自动换一张…')
+                win.after(300, fetch)
                 return
             win.after(2000, lambda: poll(unikey))
 

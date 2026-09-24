@@ -155,7 +155,12 @@ def main():
                  ("_build_accomp", "R2 无人声段伴奏整理"),
                  ("_accomp_legacy", "R2 回退路径（TS_ACCOMP_BOOST=0）"),
                  ("ui_app", "新版多入口 UI（惰性 import，必须在包里）"))
-    n_content = len(WANT_CONST) + len(WANT_MAIN)
+    n_content = len(WANT_CONST) + len(WANT_MAIN) + 3
+    # 新版 UI 里的关键件必须真的编译进了 ui_app（模块在 ≠ 内容是新的）
+    WANT_UI = (("CookieBar", "cookie 输入栏"),
+               ("TS_UI_PAGE", "初始页环境变量"),
+               ("TS_UI_GEOMETRY", "窗口位置环境变量"),
+               ("_mask", "cookie 脱敏"))
     if pyz_name is None:
         bad += n_content
     else:
@@ -181,6 +186,17 @@ def main():
                 print("  netease_login 常量数：%d" % len(strs))
                 for want, what in WANT_CONST:
                     ok = any(want in s for s in strs)
+                    bad += (0 if ok else 1)
+                    print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
+            ui = _code_of("ui_app")
+            if ui is None:
+                print("  ! PYZ 里没找到 ui_app")
+                bad += len(WANT_UI)
+            else:
+                ustrs = _collect_strings(ui)
+                print("  ui_app 常量/名字数：%d" % len(ustrs))
+                for want, what in WANT_UI:
+                    ok = any(want in s for s in ustrs)
                     bad += (0 if ok else 1)
                     print("  %s %-26s %s" % ("✓" if ok else "✗", want, what))
             # 烤入的 cookie 模块：出货 exe 不该有，除非 TS_EXPECT_BAKED=1 明确要求

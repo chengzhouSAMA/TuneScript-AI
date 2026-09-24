@@ -109,6 +109,8 @@ def main():
             "sparse = _sparsify_harmony(gap_harmony, min_gap=1.5)",
             "accomp = keep + sparse",
             "accomp.sort(key=lambda x: x[0])",
+            # 本轮：扫码「过期」从"让用户关掉重开"改成自动换一张
+            "st.set('二维码已过期，请关掉重开')",
         )
         # 删掉**纯注释行或空行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。
