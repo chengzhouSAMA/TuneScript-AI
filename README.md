@@ -37,7 +37,25 @@ python transcriber_app.py --cli --netease "バカみたいに 柿崎ユウタ" -
 python transcriber_app.py --cli --netease-id 2103987239 --outdir ./输出
 ```
 
-也有 GUI，双击 `TuneScript AI V0.5.1.exe`，输入框里填 BV 号或网易云关键词都行。
+也有 GUI，双击 `TuneScript AI V0.5.1.exe`。界面是**左侧导航 + 右侧功能页**，每个新增功能
+都有独立入口，不用先"开始转谱"才能用到：
+
+```
+转谱       本地音频 / B站 BV 号 / 网易云搜索 → 五线谱 PDF + MIDI + 钢琴演奏 WAV
+网易云     搜索 → 选曲 → 选音质下载；扫码登录 / 退出登录 / 查看账号状态
+B站音频    BV 号 → 抓取音频（只下载也行）
+歌词       歌名 → 网易云 / QQ 歌词，带 LRC 时间轴，可另存 .lrc
+语种识别   整曲 / 逐窗判断演唱语言（Silero 内置，Qwen 走外挂）
+环境       模型 / MuseScore / ffmpeg / 和弦增强 / 网易云登录状态
+```
+
+每个页面底部都有状态、进度条和日志，长任务不占界面。
+
+只服务于扒谱的内部环节**不放进界面**：日语罗马音摩拉、英语音标音节、语种分割扒谱、
+强制对齐、ASR 重试、左右手八度与无人声段伴奏规则 —— 它们是转谱管线的内部实现，
+不是给你单独点的功能。
+
+想换回旧版单窗口界面：`set TS_UI=classic`，或 `TuneScript AI V0.5.1.exe --ui classic`。
 
 ## 输出
 
@@ -279,6 +297,8 @@ TS_QWEN_PYTHON/_RUNNER/_MODEL     Qwen 外挂路径，一般不用手动设
 TS_NETEASE_COOKIE        (空)    网易云 cookie，填了才可能拿无损
 TS_NETEASE_LEVEL         exhigh  下载音质默认值（standard/higher/exhigh/lossless/hires）
 TS_NETEASE_ALLOW_TRIAL   0       改 1 允许下载只有几十秒的试听片段
+TS_UI                    new     改成 classic 换回旧版单窗口界面
+TS_UI_GEOMETRY           (空)    钉死窗口位置大小，形如 1120x740+20+20（截图/录屏用）
 ```
 
 ### 默认开启的两条编配规则
@@ -318,7 +338,9 @@ TS_ACCOMP_OTHER          1       单独识别 other 轨并只并入无人声段
 ## 文件说明
 
 ```
-transcriber_app.py      主程序，分离→识别→融合→渲染，带 GUI
+transcriber_app.py      主程序，分离→识别→融合→渲染，带 GUI（另含旧版单窗口界面 App）
+ui_kit.py               新版 UI 的配色、控件与页面基类（纯 tkinter，无新依赖）
+ui_app.py               新版多入口 UI：左侧导航 + 6 个功能页（转谱/网易云/B站/歌词/语种/环境）
 bilibili.py             B 站 BV → DASH 音频流
 netease.py              网易云搜索 + 下载（明文 api / eapi，含试听片段检测）
 netease_login.py        网易云扫码登录（拿自己的 cookie）+ 登录状态自检

@@ -3854,7 +3854,31 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":
         cli_main()
         return
+    # UI 选择：默认新界面（左侧导航 + 每个功能独立入口）。
+    # `TS_UI=classic` 或 `--ui classic` 回到旧版单窗口 —— 这是唯一的回退通道。
+    want = os.environ.get('TS_UI', 'new').strip().lower()
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a == '--ui' and i + 1 < len(argv):
+            want = argv[i + 1].strip().lower()
+        elif a.startswith('--ui='):
+            want = a.split('=', 1)[1].strip().lower()
+
     root = tk.Tk()
+    if want != 'classic':
+        try:
+            import ui_app
+            ui_app.run(root)
+            root.mainloop()
+            return
+        except Exception:
+            # 新界面起不来也不能让软件变砖：拆干净再退回旧界面
+            traceback.print_exc()
+            try:
+                for w in list(root.winfo_children()):
+                    w.destroy()
+            except Exception:
+                pass
     App(root)
     root.mainloop()
 

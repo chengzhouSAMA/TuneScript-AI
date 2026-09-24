@@ -58,6 +58,8 @@ _new_mods = [
     'lang_id', 'audio_crop', 'lang_modes', 'lang_pipeline',
     'ja_romaji', 'en_phoneme', 'asr_refine', 'lyrics_fetch', 'lyrics_match',
     'netease', 'netease_login', 'bilibili', 'qrcode',
+    # 新版多入口 UI：ui_app 是在 main() 里惰性 import 的，静态分析找不到，必须显式列
+    'ui_kit', 'ui_app',
     'onnxruntime', 'onnxruntime.capi', 'onnxruntime.capi._pybind_state',
     'onnxruntime.capi.onnxruntime_inference_collection',
     'jaconv', 'deprecated', 'wrapt',

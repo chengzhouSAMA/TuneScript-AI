@@ -35,6 +35,8 @@ MUST_DATA = [
 #    （本工程 = `transcriber_app`）。旧版这里写 `__main__` 并只看"模块名里含 __main__"，
 #    结果被 `numpy.f2py.__main__` 蒙混过关 —— 那是个假阳性，已改由下面的脚本层检查。
 MUST_MOD = [
+    ("ui_kit", "新版 UI 控件库"),
+    ("ui_app", "新版多入口 UI 外壳"),
     ("lang_id", "LID 适配层"),
     ("netease", "网易云搜索下载"),
     ("en_phoneme", "英语音素/音节/IPA"),
@@ -151,7 +153,8 @@ def main():
     WANT_MAIN = (("_enforce_octave_gap", "R1 左右手强制拉开一个八度"),
                  ("_hand_gap_min", "R1 间隔度量"),
                  ("_build_accomp", "R2 无人声段伴奏整理"),
-                 ("_accomp_legacy", "R2 回退路径（TS_ACCOMP_BOOST=0）"))
+                 ("_accomp_legacy", "R2 回退路径（TS_ACCOMP_BOOST=0）"),
+                 ("ui_app", "新版多入口 UI（惰性 import，必须在包里）"))
     n_content = len(WANT_CONST) + len(WANT_MAIN)
     if pyz_name is None:
         bad += n_content
