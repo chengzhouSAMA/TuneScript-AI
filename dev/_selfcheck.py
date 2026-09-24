@@ -315,6 +315,28 @@ def main():
     check("generate_qr_key 每次开一轮干净会话",
           hasattr(nl, '_reset_session') and nl._reset_session() is not None)
 
+    # 会员档位标签：拿不到就说"未知"，**绝不能**说成"无会员"
+    check("vipType=None → 会员档位未知（不是无会员）",
+          nl._vip_label(None) == "会员档位未知", nl._vip_label(None))
+    check("vipType=0 → 无会员", nl._vip_label(0) == "无会员")
+    check("vipType=10/11 → 黑胶 VIP/SVIP",
+          nl._vip_label(10) == "黑胶 VIP" and nl._vip_label(11) == "黑胶 SVIP")
+    check("vipType=110（本机实测值）→ 认得出是黑胶 VIP",
+          "黑胶 VIP" in nl._vip_label(110), nl._vip_label(110))
+    _oa = nl.account_info
+    try:
+        nl.account_info = lambda cookie=None: {"ok": True, "nickname": "X",
+                                               "vip_type": None,
+                                               "vip_label": "会员档位未知"}
+        _h = nl.quality_hint()
+        check("档位未知时 quality_hint 不写「无会员」", "无会员" not in _h, _h)
+        nl.account_info = lambda cookie=None: {"ok": True, "nickname": "X",
+                                               "vip_type": 110,
+                                               "vip_label": nl._vip_label(110)}
+        check("档位=110 时提示可尝试无损", "无损" in nl.quality_hint())
+    finally:
+        nl.account_info = _oa
+
     # 优先级的第三档：打包时烤进 exe 的默认值（用假模块模拟，不碰真密钥）
     _bak2 = nl.COOKIE_DIR_OVERRIDE
     _tmp2 = tempfile.mkdtemp(prefix="nl_bake_")

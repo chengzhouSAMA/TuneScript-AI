@@ -1757,4 +1757,97 @@ else:
 | `lang_dev/_probe_quality_order.py` | **新增**：顺序回归 + 联网回归，8 项 |
 | `lang_dev/_selfcheck.py` | 新增 §[14] 共 5 项 |
 
+---
+---
+
+# 第十四部分：无损拿到了，但提示还在说「未知会员」「需要会员 cookie」
+
+> 主人贴的新日志：**无损成了** ——
+> `请求 hires -> 实际 lossless 808kbps flac（cookie 优先，命中 eapi:hires）`，
+> 但同一段里还有两句不对：
+> `已登录：承州SAMA（未知）`、`⚠️ 请求的是 Hi-Res，服务端只给了 无损 —— 无损 / Hi-Res 需要黑胶会员 cookie`。
+
+## 85. 先确认：第十三部分的修复**生效了**
+
+`命中 eapi:hires` + `22.1 MB flac` 说明确实走了带 cookie 的 app 接口、拿到了真无损。
+剩下的两句话是**提示逻辑**的问题，不是下载的问题。
+
+## 86. 问题一：`vipType = 110` 落进了"未知"
+
+旧映射是 `{0:"无会员",10:"黑胶VIP",11:"黑胶SVIP"}.get(vipType, "未知")`。
+拿主人真实的 cookie 现场查：
+
+```
+ok=True  nickname=承州SAMA
+vip_type=110   → 旧: "未知"      新: "黑胶 VIP（vipType=110）"
+quality_hint   → 旧: "已登录 承州SAMA（未知）：可尝试无损"
+                 新: "已登录 承州SAMA（黑胶 VIP（vipType=110））：可尝试无损 / Hi-Res"
+```
+
+**老接口给 0/10/11，新版账号给的是位掩码**（实测黑胶会员 = `110`）。
+新 `_vip_label()`：先查经典值，再按低位判 `SVIP(11) / VIP(10)`，并把**原值留在括号里**，
+下次对不上能一眼看出来。
+
+⚠️ 另外修掉一处更危险的默认值：`quality_hint()` 原来写的是
+`if (vip_type or 0) >= 10: … else: "（无会员）"` ——
+**拿不到档位时会把一个真会员说成「无会员」**。现在 `vip_type is None` 走单独一句
+"会员档位未知：能不能拿无损要看具体歌曲的授权"。
+
+## 87. 问题二：会员已生效，却还在喊"需要黑胶会员 cookie"
+
+那三句提示的触发条件原来只看"有没有降级"，不看"为什么降级"。
+改成 `ui_app._why_downgraded()` 分情况说：
+
+| 情况 | 提示 |
+|---|---|
+| 未登录 / cookie 没生效 | …—— 想拿更高档位要先配 cookie（无损 / Hi-Res 需要黑胶会员） |
+| **已登录，且拿到了 lossless/hires** | …—— **会员已生效；Hi-Res 是逐曲授权的，这首歌没有更高档位** |
+| 已登录，但仍只有 320k | …—— 已登录（档位），服务端仍只给这个档位，多半是这首歌的版权限制 |
+
+`netease.fetch_song()` 里那句 `注意：服务端把音质降级了（无损通常需要黑胶会员 cookie）`
+也按同一套逻辑分叉：已经登录时改成
+`注意：服务端给的是 lossless，不是你请求的 hires —— 会员已生效，多半是这首歌没有更高档位的授权`。
+
+主人这次的输出因此变成：
+
+```
+音质：无损（808 kbps flac）
+⚠️ 请求的是 Hi-Res，服务端只给了 无损 —— 会员已生效；Hi-Res 是逐曲授权的，这首歌没有更高档位
+账号：已登录 承州SAMA（黑胶 VIP（vipType=110））
+```
+
+## 88. 验证
+
+| 项 | 结果 |
+|---|---|
+| `lang_dev/_check_newui.py` | **49/49**（§7 用的就是主人这份真实日志：hires→lossless 808kbps flac） |
+| `lang_dev/_selfcheck.py` | **99/99**（新增 6 项 vipType 标签与 quality_hint） |
+| `lang_dev/_check_gui.py` | 0 问题 |
+
+真实 cookie 现场复核（`COOKIE_DIR_OVERRIDE` 指向 `dist/`，不打印 cookie 内容）：
+`vip_type=110 → 黑胶 VIP（vipType=110）`、`quality_hint` 提示"可尝试无损 / Hi-Res"。
+
+## 89. 出货 exe
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 547.8 MB |
+| sha256 | `8179E8E8E481BBB5719A176D3F534CC9B256630B3E671D1D41FDFD60FE08A457` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `AEE9BA93…`） |
+| 归档校验 | 45 项，0 问题 |
+
+**顺带确认两件事**：换包没有动 `dist/netease_cookie.txt`（659 字节，还在）；
+出货 exe 里**没有**被烤进 cookie（`netease_cookie_baked` 不在 PYZ 里）。
+
+## 90. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `netease_login.py` | `_vip_label()`（支持位掩码 + 原值）；`account_info` 从 `account.vipType` 兜底；`quality_hint` 不再把未知档位说成"无会员" |
+| `netease.py` | `fetch_song` 的降级提示按"是否已登录"分叉 |
+| `ui_app.py` | 新增 `_why_downgraded()`；`_quality_lines` 按"未登录 / 已拿到无损 / 有会员但仍 320k"三种情况给原因 |
+| `lang_dev/_check_newui.py` | §7 换成主人的真实数据，共 9 项 |
+| `lang_dev/_selfcheck.py` | 新增 6 项 vipType 标签检查 |
+
 

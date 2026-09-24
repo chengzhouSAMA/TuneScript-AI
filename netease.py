@@ -342,7 +342,13 @@ def fetch_song(query=None, song_id=None, out_dir=".", level="exhigh",
 
     log(res["reason"])
     if res.get("downgraded"):
-        log("注意：服务端把音质降级了（无损通常需要黑胶会员 cookie）")
+        # 提示要分情况：已经登录了还喊"需要会员 cookie"会把会员绕晕
+        got = res.get("level") or "?"
+        if st.get("ok"):
+            log("注意：服务端给的是 %s，不是你请求的 %s —— 会员已生效，"
+                "多半是这首歌没有更高档位的授权" % (got, level))
+        else:
+            log("注意：服务端把音质降级了（无损 / Hi-Res 需要黑胶会员 cookie）")
 
     pk = info.get("picked") or {}
     name = "%s - %s.%s" % (safe_name(pk.get("name") or str(song_id)),

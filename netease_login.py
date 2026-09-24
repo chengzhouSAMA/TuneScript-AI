@@ -267,10 +267,36 @@ def account_info(cookie=None):
     if not prof.get("nickname") and not acct.get("id"):
         return {"ok": False, "reason": "cookie 无效或已过期", "nickname": None,
                 "vip_type": None, "user_id": None}
+    # vipType 有时只在 account 里、profile 里是 None；两边都看一眼。
+    # 拿不到就老实说"档位未知" —— **不能当成"无会员"**，
+    # 否则一个真会员会被提示成"无会员，无损仍需会员"（实测踩过）。
+    vt = prof.get("vipType")
+    if vt is None:
+        vt = acct.get("vipType")
     return {"ok": True, "reason": "已登录", "nickname": prof.get("nickname"),
-            "vip_type": prof.get("vipType"), "user_id": acct.get("id"),
-            "vip_label": {0: "无会员", 10: "黑胶 VIP", 11: "黑胶 SVIP"}.get(
-                prof.get("vipType"), "未知")}
+            "vip_type": vt, "user_id": acct.get("id"),
+            "vip_label": _vip_label(vt)}
+
+
+def _vip_label(vip_type):
+    """会员档位的人话标签；拿不到具体档位时**不要**说成"无会员"。
+
+    老接口给的是 0 / 10 / 11，**新版账号给的是位掩码** ——
+    实测主人的黑胶会员是 `110`（旧代码直接落进 `"未知"`，界面上就写着"（未知）"）。
+    位掩码按低位判定，并把原值留在括号里，方便以后对不上时一眼看出来。
+    """
+    if vip_type is None:
+        return "会员档位未知"
+    if vip_type == 0:
+        return "无会员"
+    known = {4: "音乐包", 8: "音乐包", 10: "黑胶 VIP", 11: "黑胶 SVIP"}
+    if vip_type in known:
+        return known[vip_type]
+    if vip_type & 11 == 11:
+        return "黑胶 SVIP（vipType=%s）" % vip_type
+    if vip_type & 10 == 10:
+        return "黑胶 VIP（vipType=%s）" % vip_type
+    return "会员（vipType=%s）" % vip_type
 
 
 def quality_hint(cookie=None):
@@ -278,8 +304,16 @@ def quality_hint(cookie=None):
     info = account_info(cookie)
     if not info["ok"]:
         return "未登录：免登录最高一般到 320kbps，部分曲目只有 30~45 秒试听"
-    if (info.get("vip_type") or 0) >= 10:
-        return "已登录 %s（%s）：可尝试无损" % (info["nickname"], info.get("vip_label"))
+    vt = info.get("vip_type")
+    if vt is None:
+        return ("已登录 %s（会员档位未知）：能不能拿无损要看具体歌曲的授权"
+                % info["nickname"])
+    if vt >= 10:
+        return "已登录 %s（%s）：可尝试无损 / Hi-Res" % (info["nickname"],
+                                                        info.get("vip_label"))
+    if vt:
+        return ("已登录 %s（%s）：档位一般到 320kbps，无损需要黑胶会员"
+                % (info["nickname"], info.get("vip_label")))
     return "已登录 %s（无会员）：一般可拿 320kbps 整曲，无损仍需会员" % info["nickname"]
 
 

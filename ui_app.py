@@ -42,6 +42,23 @@ def _artists(v):
     return str(v or '')
 
 
+def _why_downgraded(want, got, logged, vip_label):
+    """降级原因要**分情况**说。
+
+    已经登录了还喊「无损 / Hi-Res 需要黑胶会员 cookie」会把会员绕晕 ——
+    实测主人就是黑胶会员、已经拿到 lossless 808kbps flac，却看到这句。
+    """
+    w = LEVEL_LABEL.get(want, want)
+    g = LEVEL_LABEL.get(got, got)
+    head = '请求的是 %s，服务端只给了 %s' % (w, g)
+    if not logged:
+        return head + ' —— 想拿更高档位要先配 cookie（无损 / Hi-Res 需要黑胶会员）'
+    if got in ('lossless', 'hires'):
+        return head + ' —— 会员已生效；%s 是逐曲授权的，这首歌没有更高档位' % w
+    return (head + ' —— 已登录（%s），服务端仍只给这个档位，多半是这首歌的版权限制'
+            % (vip_label or '会员档位未知'))
+
+
 def _quality_lines(info):
     """把 `netease.fetch_song()` 的 info 变成几行"人话"。
 
@@ -56,18 +73,19 @@ def _quality_lines(info):
     got = res.get('level') or ''
     br = int(res.get('br') or 0)
     fmt = res.get('fmt') or ''
+    ck = info.get('cookie') or {}
+    logged = bool(ck.get('ok'))
     if got:
         line = '音质：%s' % LEVEL_LABEL.get(got, got)
         if br:
             line += '（%d kbps%s）' % (br // 1000, (' ' + fmt) if fmt else '')
         out.append(line)
         if want and got != want:
-            out.append('⚠️ 请求的是 %s，服务端只给了 %s —— 无损 / Hi-Res 需要黑胶会员 cookie'
-                       % (LEVEL_LABEL.get(want, want), LEVEL_LABEL.get(got, got)))
-    ck = info.get('cookie') or {}
-    if ck.get('ok'):
+            out.append('⚠️ ' + _why_downgraded(want, got, logged, ck.get('vip_label')))
+    if logged:
         out.append('账号：已登录 %s（%s）'
-                   % (ck.get('nickname') or '?', ck.get('vip_label') or '会员状态未知'))
+                   % (ck.get('nickname') or '?',
+                      ck.get('vip_label') or '会员档位未知'))
     else:
         out.append('账号：未登录 / cookie 未生效（%s）'
                    % (ck.get('reason') or '没有 cookie，免登录最高一般 320kbps'))

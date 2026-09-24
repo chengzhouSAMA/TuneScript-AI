@@ -142,23 +142,51 @@ def main():
     root.withdraw()
 
     print('\n=== 7) 音质展示：不能把「请求的档位」当成「实际拿到的」===')
-    fake = {'level': 'hires',
+    # 主人真实那一份：黑胶会员、请求 hires、实际 lossless 808kbps flac
+    real = {'level': 'hires',
+            'resolve': {'level': 'lossless', 'br': 808000, 'fmt': 'flac',
+                        'downgraded': True},
+            'cookie': {'ok': True, 'nickname': '承州SAMA',
+                       'vip_label': '会员档位未知'},
+            'reason': '请求 hires -> 实际 lossless 808kbps flac（cookie 优先，命中 eapi:hires）'}
+    rl = ui_app._quality_lines(real)
+    rj = '\n'.join(rl)
+    print('    ' + '\n    '.join(rl))
+    check('无损被如实显示', '音质：无损（808 kbps flac）' in rj)
+    check('没有把 hires 说成实际音质', '音质：Hi-Res' not in rj)
+    check('会员已生效时不再喊"需要会员 cookie"',
+          '需要黑胶会员' not in rj and '需要会员 cookie' not in rj)
+    check('改成说清是逐曲授权',
+          '会员已生效' in rj and '逐曲授权' in rj)
+    check('账号行照实写昵称', '已登录 承州SAMA' in rj)
+
+    # 未登录 + 被降级 → 这时才该提"需要会员"
+    anon = {'level': 'hires',
             'resolve': {'level': 'exhigh', 'br': 320000, 'fmt': 'mp3',
                         'downgraded': True},
-            'cookie': {'ok': True, 'nickname': '某人', 'vip_label': '黑胶 VIP'},
-            'reason': '请求 hires -> 实际 exhigh 320kbps mp3'}
-    joined = '\n'.join(ui_app._quality_lines(fake))
-    check('显示的是服务端实际给的档位（320kbps）', '音质：320kbps（320 kbps mp3）' in joined,
-          joined.split('\n')[0])
-    check('没有把 hires 说成"实际音质"', '音质：Hi-Res' not in joined)
-    check('明确写出被降级 + 原因', '只给了 320kbps' in joined and '需要黑胶会员' in joined)
-    check('带上账号状态', '已登录' in joined and '黑胶 VIP' in joined)
-    fake2 = {'level': 'exhigh',
-             'resolve': {'level': 'exhigh', 'br': 320000, 'fmt': 'mp3'},
-             'cookie': {'ok': False, 'reason': 'cookie 无效或已过期'}}
-    j2 = '\n'.join(ui_app._quality_lines(fake2))
-    check('没降级时不乱报警', '⚠️ 请求的是' not in j2, j2.replace('\n', ' | '))
-    check('未登录时说明原因', '未登录' in j2 and 'cookie 无效或已过期' in j2)
+            'cookie': {'ok': False, 'reason': '没有 cookie'},
+            'reason': '请求 hires -> 实际 exhigh 320kbps mp3（匿名优先，命中 plain:1900000）'}
+    aj = '\n'.join(ui_app._quality_lines(anon))
+    check('未登录被降级时才提示需要会员',
+          '需要黑胶会员' in aj and '音质：320kbps' in aj)
+
+    # 已登录但只有 320k → 说版权限制，别赖会员
+    vip320 = {'level': 'hires',
+              'resolve': {'level': 'exhigh', 'br': 320000, 'fmt': 'mp3'},
+              'cookie': {'ok': True, 'nickname': '某人', 'vip_label': '黑胶 VIP'}}
+    vj = '\n'.join(ui_app._quality_lines(vip320))
+    check('已登录却只给 320k → 指向版权限制',
+          '版权限制' in vj and '需要黑胶会员' not in vj)
+    check('没降级时不乱报警',
+          '⚠️' not in '\n'.join(ui_app._quality_lines(
+              {'level': 'exhigh', 'resolve': {'level': 'exhigh', 'br': 320000,
+                                              'fmt': 'mp3'},
+               'cookie': {'ok': False, 'reason': 'x'}})))
+    check('未登录时说明原因',
+          '未登录' in '\n'.join(ui_app._quality_lines(
+              {'level': 'exhigh', 'resolve': {'level': 'exhigh', 'br': 320000,
+                                              'fmt': 'mp3'},
+               'cookie': {'ok': False, 'reason': 'cookie 无效或已过期'}})))
 
     if '--shot' in sys.argv:
         root.deiconify()
