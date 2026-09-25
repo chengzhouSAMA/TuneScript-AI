@@ -2381,6 +2381,68 @@ fanwut/jiabin 基本不变（那两首的贝斯轨本身很弱或已被"近乎�
 | `回归验收/regress_one.py` | `--accomp` 改设 `ACCOMP_PRIORITY`；臂 A 的 lambda 收下 `out_dir`（否则臂 A 一跑就崩）；`--code` 旧快照的符号用 `getattr` 兜底 |
 | `备份/pre_priority_20260925/` | **新增**：本轮改动前的源码快照 |
 
+---
+
+# 空间清理（2026-09-25 第三轮）
+
+主人要求：「删除不需要的文件，包括之前训练模型的 data 文件」。
+
+## 120. 删了什么（共 48.2 GB）
+
+工作区 **57.68 GB → 9.45 GB**，磁盘空闲 61.8 GB → **108.6 GB**。
+
+| 删掉 | 大小 | 为什么不需要 |
+|---|---|---|
+| `ai_transcriber_dev/data/` | **22.2 GB** | **主人点名的训练数据**：`maestro/` 18 GB（MAESTRO 数据集）、`pseudo_labels/` 1.2 GB、自训练检查点 `maestro_model_v3*.pt` 等、实验音频网格 `grid_*.wav`。出货路径一行都不引用（已 grep 核验） |
+| `回归验收/out/` + `out_vfy/` | 12.7 GB | 历轮验收产物。全部可由冻结分轨确定性重跑，报告里的数字都留在 `回归验收/*.md` 与 `results*/` |
+| `build/` + `build_new/` + `build_progress/` | 8.5 GB | PyInstaller 中间产物，重打时自动重建 |
+| `v01_publish/` | 1.53 GB | V0.1 的 exe 与分包残留 |
+| `dist/` 三个旧 exe（V0.4 / V0.5 / _backup V0.5） | 1.59 GB | 已被 V0.5.1 取代 |
+| `回归验收/_diag_fanwut/` + `_cache/` | 605 MB | 诊断与 Basic Pitch 中间缓存 |
+| `回归验收/_work/` 里的实验音频（`_fill_ab`、`_vfyex_*`、`_t9_synsrc` …） | 1.9 GB | 一次性实验产物 |
+| `lang_dev/_out_*` | 510 MB | 探针输出 |
+| `node_modules/` | 80 MB | 全工作区没有 `package.json`，孤儿 JS 依赖 |
+| 各 `__pycache__` | — | 字节码缓存 |
+
+## 121. ⚠️ 绝对不能删的东西（删了会静默破坏工具链）
+
+**这一轮就踩了一次**：删掉 `lang_dev/_out_intro/` 之后 `_smoke_exe.py` 直接起不来
+（它的输入切片 `shiki_intro_0_30.wav` 就放在那儿）—— 现象是冒烟脚本**一行输出都没有**
+直接退 1。补回来的办法：`python lang_dev/_slice_intro.py`（它会从
+`回归验收/_stems/shiki/…_vocals.wav` 重新切 0~30s）。
+
+| 必须保留 | 用途 |
+|---|---|
+| `回归验收/_stems/<key>/`、`回归验收/_work/{inhuman,gouzhi,monitoring}/`、`转谱验证/<key>/` | **冻结节拍**。所有确定性 A/B 的输入；`_selfcheck.py` 还会检查 `_stems` 没被写入 |
+| `dist/` 里的 `mt3/mr_mt3/mt3.pth`、`piano_btd/…`、`ffmpeg.exe` | **外挂运行时依赖**，不是构建产物。删了 exe 能启动但一扒谱就废 |
+| `lang_id_models/` | Silero ONNX + Qwen ASR/对齐器权重（3.48 GB），语种识别用 |
+| `lang_id_venv314/` | Qwen 侧车环境（`qwen-asr` 只有 3.14 能跑） |
+| `.mt3_checkpoints/` | MT3 权重 |
+| `lang_dev/_out_intro/shiki_intro_0_30.wav` | `_smoke_exe.py` 的输入切片（可用 `_slice_intro.py` 重建） |
+| `ai_transcriber_dev/*.py` | `regress_one.py` / `_diag_frag_interlude.py` 会 `sys.path` 挂它并 `from fragmentation import fragment_ratio`、`from evaluate import midi_notes` |
+| `_gh_repo/`、`备份/` | 推送用的仓库克隆、源码快照 |
+
+**清理后的验收（都是清理之后跑的）**：
+
+- `_test_handgap_accomp.py` 89/89、`_selfcheck.py` 99/99、`_check_newui.py` 54/54、
+  `_check_gui.py` 0 问题、`_verify_exe.py` 52 项 0 问题
+- `_smoke_exe.py --arm both`：OFF 11/11、ON 12/12
+- **`regress_one.py --song shiki --arm B` 重跑结果与清理前逐字节相同**
+  （7269 B / `551EF658C37F204E`，sim `0.8884256134780385`）—— 冻结节拍与依赖完好
+
+### 附带损失（记录在案）
+
+`TuneScript-AI/` 这个 V0.1 时期的小仓库被删掉了 `.git`（目录里只剩
+`README.md`/`requirements.txt`/`transcriber_app.py`/`音乐转谱器.spec`）。
+纯属清理时误列，代码文件本身还在；V0.1 的历史本来就已在 GitHub 上。
+
+## 122. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| （无源码改动） | 只删文件 + 本文件。**不需要重打 exe**：没动任何影响转谱行为的代码 |
+
+
 
 
 
