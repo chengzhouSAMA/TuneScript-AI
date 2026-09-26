@@ -2442,6 +2442,80 @@ fanwut/jiabin 基本不变（那两首的贝斯轨本身很弱或已被"近乎�
 |---|---|
 | （无源码改动） | 只删文件 + 本文件。**不需要重打 exe**：没动任何影响转谱行为的代码 |
 
+---
+
+# 推送闸门（2026-09-25 第四轮）
+
+主人要求：「添加一个底层代码，不允许让任何 AI 修改/上传到我的 GitHub」。
+
+## 123. 做法：`dev/push_guard.py` + git `pre-push` 钩子
+
+`lang_dev/push_guard.py`（在仓库里是 `dev/push_guard.py`）装成
+`_gh_repo/.git/hooks/pre-push`。git 每次 push 前都会跑它，**默认拒绝**：
+
+```
+⛔ 推送被「人类钥匙闸门」拦住：没有找到钥匙。
+   钥匙文件：C:\Users\35968\.tunescript_push_key
+   或环境变量 TS_PUSH_KEY
+```
+
+钥匙放在**仓库外面**（不入库、不进快照、不进 exe）。比对用 `hmac.compare_digest`；
+每次尝试（放行/拒绝都算）追加一行到 `~/.tunescript_push_audit.log`。
+
+常用命令：
+
+```
+python dev/push_guard.py --keygen     # 生成钥匙（已存在则不动）
+python dev/push_guard.py --install    # 装进当前仓库的 .git/hooks/pre-push
+python dev/push_guard.py --uninstall
+python dev/push_guard.py --status
+```
+
+主人自己推送（PowerShell）：
+
+```powershell
+$env:TS_PUSH_KEY = (Get-Content "$env:USERPROFILE\.tunescript_push_key")
+git push
+Remove-Item Env:\TS_PUSH_KEY
+```
+
+## 124. 验收：不是"看代码像对的"，是真的推了一次
+
+`lang_dev/_check_pushguard.py` 会建一个临时仓库 + 临时**裸**远端，真跑 `git push`：
+
+```
+=== 1) 判定逻辑 ===
+  ✓ 没有钥匙 → 拒绝          ✓ 钥匙文件对 → 放行      ✓ 环境变量给错 → 拒绝
+  ✓ 钥匙带空白 → 仍放行（strip 过）    ✓ 钥匙多一个字 → 拒绝
+  ✓ 每次都写了审计日志        ✓ 审计里既有 ALLOW 也有 DENY
+=== 2) 真推一次：装闸门后能不能推上去 ===
+  ✓ 没有钥匙：push 被拒绝（rc=1）      ✓ 拒绝时打出了人话说明
+  ✓ 远端确实没有收到任何东西（ls-remote 为空）
+  ✓ 有钥匙：push 成功（rc=0）          ✓ 远端这次收到了 main
+=== 3) 绕过与卸载 ===
+  ✓ ⚠️ --no-verify 确实能绕过本地钩子（已知边界）
+  ✓ --uninstall 能摘掉
+=== 汇总：16 项，16 通过，0 失败 ===
+```
+
+## 125. ⚠️ 能力边界（必须让主人知道，别把它当铁闸）
+
+这一层是**本地钩子**，它挡住的是"顺手就推"的自动化流程。**它不是安全边界**：
+
+1. **`git push --no-verify` 直接绕过** —— 自测里专门留了一条来钉这个事实。
+2. **有文件写权限的东西可以直接删掉 `.git/hooks/pre-push` 再推。**
+3. **钥匙文件 AI 也读得到**（它就在 `%USERPROFILE%` 下）。所以这道闸门对
+   "诚实的自动化"有效，对"蓄意绕过"无效。
+
+**真正的硬闸在 GitHub 侧** —— 给 `main` 加分支保护 / ruleset：禁止直接推送、
+必须走 PR 并由人批准。那样即使拿到 token 也推不上 `main`。
+（已探明：本仓库当前**没有**任何分支保护、ruleset 列表为空，token 有 `repo` 权限。）
+
+**还有一条比闸门更实在的**：这个会话里用过的 PAT 已经以明文出现在命令里。
+要真的做到"任何 AI 都推不上去"，**请去 GitHub 设置里吊销/轮换那个 token**。
+token 一旦吊销，无论本地有没有钩子、有没有钥匙，AI 都推不动。
+
+
 
 
 
