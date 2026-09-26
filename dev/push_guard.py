@@ -34,20 +34,21 @@ import subprocess
 import sys
 import time
 
-KEY_FILE = os.path.join(os.path.expanduser("~"), ".tunescript_push_key")
+KEY_FILE = (os.environ.get("TS_PUSH_KEY_FILE")
+            or os.path.join(os.path.expanduser("~"), ".tunescript_push_key"))
 AUDIT = os.path.join(os.path.expanduser("~"), ".tunescript_push_audit.log")
 HOOK_MARK = "tunescript-push-guard"
 
 
 def _read_key():
+    """只认**环境变量**里的钥匙。
+
+    ⚠️ 这里踩过一次坑，别改回去：第一版是"环境变量没有就读钥匙文件"，
+    结果**只要钥匙文件存在，任何进程（包括 AI）都能推** —— 闸门等于没有。
+    现在钥匙文件只当"正确答案"，必须由人在自己的 shell 里显式导出才放行。
+    """
     k = os.environ.get("TS_PUSH_KEY")
-    if k:
-        return k.strip()
-    try:
-        with open(KEY_FILE, encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return None
+    return k.strip() if k else None
 
 
 def _audit(verdict, detail):
@@ -62,32 +63,38 @@ def _audit(verdict, detail):
 def check(remote="", url="", refs=""):
     """返回 0 = 放行，1 = 拒绝。给 hook 和自检共用。"""
     given = _read_key()
-    if not given:
-        _audit("DENY-no-key", "%s %s" % (remote, url))
-        sys.stderr.write(
-            ("\n" + "=" * 68 + "\n"
-             "⛔ 推送被「人类钥匙闸门」拦住：没有找到钥匙。\n\n"
-             "   钥匙文件：%s\n"
-             "   或环境变量 TS_PUSH_KEY\n\n"
-             "这是**故意**的设计：不允许任何自动化（含 AI）把改动推到主人的 GitHub。\n"
-             "想推送请由主人亲自执行：\n\n"
-             "   PowerShell:\n"
-             "     $env:TS_PUSH_KEY = (Get-Content \"$env:USERPROFILE\\.tunescript_push_key\")\n"
-             "     git push\n\n"
-             "   首次使用先造钥匙：python dev/push_guard.py --keygen\n"
-             + "=" * 68 + "\n") % KEY_FILE)
-        return 1
     try:
         with open(KEY_FILE, encoding="utf-8") as f:
             stored = f.read().strip()
     except OSError:
-        stored = os.environ.get("TS_PUSH_KEY", "")
-    if stored and hmac.compare_digest(given, stored):
+        stored = ""
+    if not stored:
+        _audit("DENY-no-keyfile", "%s %s" % (remote, url))
+        sys.stderr.write(
+            "\n⛔ 推送被拦：还没造钥匙。先跑 python dev/push_guard.py --keygen\n"
+            "   钥匙文件应位于：%s\n" % KEY_FILE)
+        return 1
+    if not given:
+        _audit("DENY-no-env", "%s %s" % (remote, url))
+        sys.stderr.write(
+            ("\n" + "=" * 68 + "\n"
+             "⛔ 推送被「人类钥匙闸门」拦住：没有在本进程里提供钥匙。\n\n"
+             "   注意：**光是钥匙文件存在不算授权** —— 否则任何进程（含 AI）\n"
+             "   都能推，闸门就白装了。必须由人显式导出：\n\n"
+             "   PowerShell:\n"
+             "     $env:TS_PUSH_KEY = (Get-Content \"$env:USERPROFILE\\.tunescript_push_key\")\n"
+             "     git push\n"
+             "     Remove-Item Env:\\TS_PUSH_KEY\n\n"
+             "这是**故意**的设计：不允许任何自动化（含 AI）把改动推到主人的 GitHub。\n"
+             "   首次使用先造钥匙：python dev/push_guard.py --keygen\n"
+             + "=" * 68 + "\n"))
+        return 1
+    if hmac.compare_digest(given, stored):
         _audit("ALLOW", "%s %s" % (remote, url))
         return 0
     _audit("DENY-bad-key", "%s %s" % (remote, url))
     sys.stderr.write(
-        "\n⛔ 推送被拦：钥匙不匹配（%s）。\n"
+        "\n⛔ 推送被拦：钥匙不匹配（比对文件 %s）。\n"
         "   若确实是主人在操作，检查 TS_PUSH_KEY 是不是多带了空格/换行。\n" % KEY_FILE)
     return 1
 
