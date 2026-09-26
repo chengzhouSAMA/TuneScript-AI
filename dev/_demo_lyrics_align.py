@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""_demo_lyrics_align.py — 完整链路 demo（主人指定的外挂方案）。
+"""_demo_lyrics_align.py — 完整链路 demo（用户指定的外挂方案）。
 
     联网取歌词 → Qwen 首轮识别 → **比对**（确认曲目 / 判掉无歌词段）
     → 歌词作 **context** 重新识别 + **强制对齐** → 真实逐字时间戳 → 罗马音摩拉

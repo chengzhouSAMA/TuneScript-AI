@@ -16,7 +16,7 @@ git 在每次 push 前会跑 `.git/hooks/pre-push`，本脚本就是它的实现
     python dev/push_guard.py --uninstall
     python dev/push_guard.py --status
 
-主人自己推送时（PowerShell）：
+你自己推送时（PowerShell）：
 
     $env:TS_PUSH_KEY = (Get-Content "$env:USERPROFILE\\.tunescript_push_key")
     git push
@@ -85,7 +85,7 @@ def check(remote="", url="", refs=""):
              "     $env:TS_PUSH_KEY = (Get-Content \"$env:USERPROFILE\\.tunescript_push_key\")\n"
              "     git push\n"
              "     Remove-Item Env:\\TS_PUSH_KEY\n\n"
-             "这是**故意**的设计：不允许任何自动化（含 AI）把改动推到主人的 GitHub。\n"
+             "这是**故意**的设计：不允许任何自动化（含 AI）把改动推到你的 GitHub。\n"
              "   首次使用先造钥匙：python dev/push_guard.py --keygen\n"
              + "=" * 68 + "\n"))
         return 1
@@ -95,7 +95,7 @@ def check(remote="", url="", refs=""):
     _audit("DENY-bad-key", "%s %s" % (remote, url))
     sys.stderr.write(
         "\n⛔ 推送被拦：钥匙不匹配（比对文件 %s）。\n"
-        "   若确实是主人在操作，检查 TS_PUSH_KEY 是不是多带了空格/换行。\n" % KEY_FILE)
+        "   若确实是你本人在操作，检查 TS_PUSH_KEY 是不是多带了空格/换行。\n" % KEY_FILE)
     return 1
 
 
@@ -181,7 +181,7 @@ def keygen():
     except OSError:
         pass
     print("已生成钥匙：%s\n"
-          "（钥匙不在仓库里，也不会被提交。主人自己推送时：\n"
+          "（钥匙不在仓库里，也不会被提交。你自己推送时：\n"
           "  PowerShell → $env:TS_PUSH_KEY = (Get-Content \"$env:USERPROFILE\\.tunescript_push_key\")\n"
           "               git push ; Remove-Item Env:\\TS_PUSH_KEY\n"
           "  也别忘了 git 的 --no-verify 能绕过本地钩子，硬闸在 GitHub 侧。）" % KEY_FILE)

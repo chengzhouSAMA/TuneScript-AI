@@ -46,7 +46,7 @@ def _why_downgraded(want, got, logged, vip_label):
     """降级原因要**分情况**说。
 
     已经登录了还喊「无损 / Hi-Res 需要黑胶会员 cookie」会把会员绕晕 ——
-    实测主人就是黑胶会员、已经拿到 lossless 808kbps flac，却看到这句。
+    实测用户就是黑胶会员、已经拿到 lossless 808kbps flac，却看到这句。
     """
     w = LEVEL_LABEL.get(want, want)
     g = LEVEL_LABEL.get(got, got)

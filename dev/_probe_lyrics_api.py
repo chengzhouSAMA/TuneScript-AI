@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """_probe_lyrics_api.py — 实测：哪些"无 cookie"歌词端点在本机可用。
 
-目标（主人要求）：爬网易云 / QQ音乐的歌词，**不使用 cookie**。
+目标（用户要求）：爬网易云 / QQ音乐的歌词，**不使用 cookie**。
 先探通端点再写正式模块 —— 这两家的接口经常变，必须实测。
 
 用法: python lang_dev/_probe_lyrics_api.py [--kw "バカみたいに 柿崎ユウタ"]

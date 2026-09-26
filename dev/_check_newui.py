@@ -142,7 +142,7 @@ def main():
     root.withdraw()
 
     print('\n=== 7) 音质展示：不能把「请求的档位」当成「实际拿到的」===')
-    # 主人真实那一份：黑胶会员、请求 hires、实际 lossless 808kbps flac
+    # 用户真实那一份：黑胶会员、请求 hires、实际 lossless 808kbps flac
     real = {'level': 'hires',
             'resolve': {'level': 'lossless', 'br': 808000, 'fmt': 'flac',
                         'downgraded': True},
