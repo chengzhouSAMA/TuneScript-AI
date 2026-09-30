@@ -31,27 +31,33 @@ PUBLISHED = [
     'README.md', 'CONSTRAINTS.md',
 ]
 DEV_DIR = 'lang_dev'
-# 词表（数据，不是文案）：出现即报，不自动改，要人工判断。前两项是"助手口吻"的
-# 称呼，其余是角色化/玩梗的痕迹。留着字面量是因为它就是这个检查的定义。
-SMELL = ('喵', '猫娘', 'Mocha', '人家', '咱', '小女子')
+
+# 旧称呼与其它助手口吻标记 —— **一律用转义写**。
+# 这个文件本身也是要上传的：写成字面量的话，仓库里就又出现那些词了
+# （第一版就是这么漏进去的，靠"扫远端全库"才抓回来）。
+# 别再"顺手"改成字面量 —— 那样每次全库扫描都会重新报它自己。
+_OLD = '\u4e3b\u4eba'                      # 旧称呼
+# 词表（数据，不是文案）：出现即报，不自动改，要人工判断。
+SMELL = ('\u55b5', '\u732b\u5a18', 'Mo' + 'cha',
+         '\u4eba\u5bb6', '\u54b1', '\u5c0f\u5973\u5b50')
 
 # 先长后短、先具体后笼统 —— 顺序不能乱。
 REPL = [
-    ('实测主人就是黑胶会员', '实测用户就是黑胶会员'),
-    ('实测主人的黑胶会员', '实测用户的黑胶会员'),
-    ('主人自己推送时', '你自己推送时'),
-    ('主人自己推送', '你自己推送'),
-    ('主人自己', '你自己'),
-    ('把改动推到主人的 GitHub', '把改动推到你的 GitHub'),
-    ('若确实是主人在操作', '若确实是你本人在操作'),
-    ('主人原话', '用户原话'),
-    ('主人要求', '用户要求'),
-    ('主人指定', '用户指定'),
-    ('主人选定', '用户选定'),
-    ('主人反馈', '用户反馈'),
-    ('主人的', '用户的'),
-    ('主人是', '用户是'),
-    ('主人', '用户'),          # 兜底
+    ('实测' + _OLD + '就是黑胶会员', '实测用户就是黑胶会员'),
+    ('实测' + _OLD + '的黑胶会员', '实测用户的黑胶会员'),
+    (_OLD + '自己推送时', '你自己推送时'),
+    (_OLD + '自己推送', '你自己推送'),
+    (_OLD + '自己', '你自己'),
+    ('把改动推到' + _OLD + '的 GitHub', '把改动推到你的 GitHub'),
+    ('若确实是' + _OLD + '在操作', '若确实是你本人在操作'),
+    (_OLD + '原话', '用户原话'),
+    (_OLD + '要求', '用户要求'),
+    (_OLD + '指定', '用户指定'),
+    (_OLD + '选定', '用户选定'),
+    (_OLD + '反馈', '用户反馈'),
+    (_OLD + '的', '用户的'),
+    (_OLD + '是', '用户是'),
+    (_OLD, '用户'),          # 兜底
 ]
 
 
@@ -88,7 +94,7 @@ def scan(path):
         print('  跳过（读不了）：%s — %s' % (os.path.relpath(path, ROOT), e))
         return hits
     for i, line in enumerate(text.splitlines(), 1):
-        if '主人' in line or any(s in line for s in SMELL):
+        if _OLD in line or any(s in line for s in SMELL):
             rule = next((o for o, _ in REPL if o in line), '(需人工看)')
             hits.append((i, line.strip(), rule))
     return hits
@@ -114,14 +120,68 @@ def fix(path):
         f.write(out.encode('utf-8'))
     n_after = out.count('\n')
     assert n_before == n_after, '行数变了，必须人工核对：%s' % path
-    return src.count('主人') - out.count('主人'), n_before, n_after
+    return src.count(_OLD) - out.count(_OLD), n_before, n_after
+
+
+def selfcheck():
+    """两件事，缺一不可：
+
+    1. **本文件不许含字面量** —— 这个文件也是要上传的。踩过一次：第一版把词表
+       写成字面量直接推上去了，仓库里又出现那些词，靠"扫远端全库"才抓回来。
+    2. **检测器必须真的会响** —— 拿一段含旧称呼的合成文本喂给 `scan()`，
+       断言它找得到。光验证"文件干净"是没有证明力的（见 break-ai-fix-loops：
+       让验证者证明自己会失败）。
+    """
+    ok = True
+    here = os.path.abspath(__file__)
+    with open(here, encoding='utf-8') as f:
+        me = f.read()
+    leaked = [s for s in (_OLD,) + SMELL if s in me]
+    if leaked:
+        print('  ✗ 本文件里出现了字面量：%s' % leaked)
+        print('    （词表要写成转义，比如 _OLD = \\u4e3b\\u4eba；'
+              '否则那些词又被推进仓库了）')
+        ok = False
+    else:
+        print('  ✓ 词表是以转义写的，文件里没有那些词')
+
+    import tempfile
+    d = tempfile.mkdtemp(prefix='ts_persona_probe_')
+    p = os.path.join(d, 'probe.py')
+    try:
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write('%s = 1  # %s\u8981\u6c42\n' % ('x', _OLD))
+        hits = scan(p)
+        if len(hits) == 1 and hits[0][2] == _OLD + '\u8981\u6c42':
+            print('  ✓ 检测器确实会响（合成长句被扫出来了）')
+        else:
+            print('  ✗ 检测器没响！扫到的是：%s' % (hits,))
+            ok = False
+        gone, nb, na = fix(p)
+        after = open(p, encoding='utf-8').read()
+        if gone == 1 and nb == na and _OLD not in after:
+            print('  ✓ 替换可用且行数不变（%d 处，%d → %d 行）' % (gone, nb, na))
+        else:
+            print('  ✗ 替换不对：%d 处，行数 %d → %d，内容 %r'
+                  % (gone, nb, na, after))
+            ok = False
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+    return ok
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--check', action='store_true', help='只报不改')
     ap.add_argument('--all', action='store_true', help='连 回归验收/备份 一起看')
+    ap.add_argument('--selftest', action='store_true',
+                    help='额外检查本文件的词表没写成字面量')
     a = ap.parse_args()
+
+    ok = True
+    if a.selftest:
+        ok = selfcheck()
 
     files = targets(a.all)
     total = 0
@@ -144,6 +204,8 @@ def main():
                 print('   ⚠️ 行数变了，必须人工核对！')
             total += gone
     print('\n合计：%d 处' % total if a.check else '\n合计清掉：%d 处' % total)
+    if not ok:
+        return 1
     return 1 if (a.check and total) else 0
 
 

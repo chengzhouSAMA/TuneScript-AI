@@ -30,8 +30,8 @@ REPO_DIR = os.path.join(ROOT, '_gh_repo')
 # name -> (stage, 说明, 命令, 预算秒)
 CHECKS = [
     ('syntax', 'fast', '所有 .py 过 ast.parse', None, 5),
-    ('persona', 'fast', '已发布文件无角色化称呼',
-     [PY, 'lang_dev/_strip_persona.py', '--check'], 10),
+    ('persona', 'fast', '已发布文件无角色化称呼（含词表自检）',
+     [PY, 'lang_dev/_strip_persona.py', '--check', '--selftest'], 10),
     ('unit', 'fast', '核心编排单元自检 89 项',
      [PY, 'lang_dev/_test_handgap_accomp.py'], 20),
     ('gui', 'fast', 'GUI 接线 0 问题',
