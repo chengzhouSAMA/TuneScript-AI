@@ -19,6 +19,7 @@ exclude = [
     "备份", "转谱验证", "回归验收",
     "_gh_repo",              # 推送用的克隆，与工作区同一份代码
     "lang_id_venv", "lang_id_venv314", "dist", "build", "build_new",
+    "promo_video",           # 已打包的宣传素材与第三方依赖，不参与出货源码检查
     "TuneScript-AI",         # V0.1 时期留下的旧快照（.git 已丢），不是本项目的一份
     # 工作区根上的一次性分析/验证脚本：不入库，也没人维护
     "_vfy_*.py", "_probe_*.py", "_diag_*.py", "_run_*.py",

@@ -2,7 +2,7 @@
 """音乐转谱器 —— 识别音频并生成钢琴 MIDI 与五线谱。
 
 管线：
-  音频文件 -> (ffmpeg 解码为 22050Hz 单声道 WAV，非 WAV/FLAC/OGG 时需要)
+  音频文件 -> (ffmpeg 无损 PCM 解码，保留原采样率/声道，非 WAV/FLAC/OGG 时需要)
           -> [Demucs 四轨分离: 人声/鼓/贝斯/其他(与识音 shiyin.notalabs.cn
               同原理：深度学习频谱掩码源分离)]
           -> Basic Pitch (ONNX, CPU) 逐轨识别音符
@@ -27,7 +27,7 @@
   - 五线谱 PDF 是硬保证：先渲染 PDF 再渲染 WAV，PDF 失败自动降级
     (重试 → 无延音线版 → 左右手分谱)，绝不允许“有曲子没谱”；
   - 乐谱量化用音频节拍跟踪(librosa)的 BPM，不用 MIDI 默认 120，
-    避免小节线与实际节拍错位；谱面最小音符为八分音符；
+    避免小节线与实际节拍错位；谱面保留十六分音符与重叠长音；
   - 打包后用 sys._MEIPASS 定位内置的 nmp.onnx 模型；
     Demucs 模型首次运行自动下载(~80MB，缓存在用户目录)。
 """
@@ -576,7 +576,12 @@ def decrypt_ncm(ncm_path, out_dir, progress):
 
 
 def decode_to_wav(audio_path, ffmpeg, out_wav, progress):
-    """非 WAV/FLAC/OGG 时用 ffmpeg 统一转成 22050Hz 单声道 16bit WAV。"""
+    """解码容器，但保留原采样率和声道；模型各自在入口做所需的重采样。
+
+    在 Demucs 之前转成 22050Hz 单声道会永久丢失立体声与高频信息；
+    分离阶段再复制两个声道、上采样到 44100Hz 也无法找回这些信息。
+    浮点 PCM 还避免弱音再次量化到 16bit。
+    """
     ext = os.path.splitext(audio_path)[1].lower()
     if ext in NATIVE_EXT:
         progress("音频为 WAV/FLAC/OGG，无需解码。")
@@ -589,13 +594,13 @@ def decode_to_wav(audio_path, ffmpeg, out_wav, progress):
     progress("使用 ffmpeg 解码音频…")
     cmd = [
         ffmpeg, "-y", "-i", audio_path,
-        "-ac", "1", "-ar", "22050", "-sample_fmt", "s16", out_wav,
+        "-map", "0:a:0", "-vn", "-c:a", "pcm_f32le", out_wav,
     ]
     # errors="replace"：ffmpeg 的 stderr 可能含 GBK/UTF-8 混合字节，
     # 默认编码解码会抛 UnicodeDecodeError（在读取线程中崩溃）。
     p = subprocess.run(cmd, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=600)
-    if not os.path.isfile(out_wav) or os.path.getsize(out_wav) == 0:
+    if p.returncode != 0 or not _valid_wav(out_wav):
         raise RuntimeError("ffmpeg 解码失败：" + (p.stderr or "").strip()[-400:])
     return out_wav
 
@@ -660,35 +665,49 @@ def transcribe_to_midi(wav_path, model_path, progress):
 
     progress("正在调整为『人能弹』的钢琴谱…")
     melody, accomp = _split_melody_accomp(all_notes)
-    out, left, right = fuse_to_piano(melody, accomp)
+    out, left, right = fuse_to_piano(
+        melody, accomp, arrangement=_arrangement_mode())
     tempo = _estimate_tempo(midi_data)
     progress("AI 识别完成，已生成 MIDI。")
     return out, left, right, tempo
 
 
 def _mido_to_notes(midi, tempo_bpm=120.0):
-    """把 MT3 输出的 mido.MidiFile 解析成 (start, end, pitch, velocity) 列表。
+    """把 MT3 MIDI 按全局变速时间轴解码，保留声道、再起音及原始力度。
 
-    时间单位是秒：ticks -> beats -> 秒(用 ticks_per_beat 与 BPM 换算)。
-    单轨多音高(polyphonic)事件被还原成独立的音符起止，供后续分手用。
+    零力度 note_on 等同 note_off。同声道同音高重叠按 FIFO 配对；
+    未闭合的音只延至文件结束，不凭空补时长。鼓通道不参与钢琴识别。
     """
+    from collections import defaultdict, deque
+    from mido import merge_tracks, tick2second, bpm2tempo
+
+    if midi.type == 2:
+        raise ValueError("异步 MIDI 轨没有共享时间轴，不能直接融合。")
     tpb = midi.ticks_per_beat or 480
-    sec_per_tick = 60.0 / (tempo_bpm * tpb)
+    if tpb < 0:
+        raise ValueError("暂不支持 SMPTE 时间格式的 MIDI。")
+    tempo = bpm2tempo(tempo_bpm)
+    now = 0.0
+    active = defaultdict(deque)
     notes = []
-    for track in midi.tracks:
-        abs_tick = 0
-        on = {}  # note -> start_tick
-        for msg in track:
-            abs_tick += msg.time
+    for msg in merge_tracks(midi.tracks):
+        now += tick2second(msg.time, tpb, tempo)
+        if msg.type == "set_tempo":
+            tempo = msg.tempo
+        elif msg.type in ("note_on", "note_off") and msg.channel != 9:
+            key = (msg.channel, msg.note)
             if msg.type == "note_on" and msg.velocity > 0:
-                on.setdefault(msg.note, abs_tick)
-            elif msg.type == "note_off":
-                st = on.pop(msg.note, None)
-                if st is not None:
-                    s = st * sec_per_tick
-                    e = abs_tick * sec_per_tick
-                    if e > s + 1e-4:
-                        notes.append((s, e, msg.note, 80))
+                active[key].append((now, msg.velocity))
+            elif active.get(key):
+                start, velocity = active[key].popleft()
+                if now > start + 1e-4:
+                    notes.append((start, now, msg.note, velocity))
+                if not active[key]:
+                    del active[key]
+    for (_channel, pitch), pending in active.items():
+        for start, velocity in pending:
+            if now > start + 1e-4:
+                notes.append((start, now, pitch, velocity))
     notes.sort(key=lambda x: (x[0], x[2]))
     return notes
 
@@ -731,7 +750,8 @@ def transcribe_mt3(wav_path, checkpoint, progress, model_path=None, max_sec=90.0
         notes = notes + [n for n in bp_notes if n[0] >= max_sec]
 
     melody, accomp = _split_melody_accomp(notes)
-    out, left, right = fuse_to_piano(melody, accomp)
+    out, left, right = fuse_to_piano(
+        melody, accomp, arrangement=_arrangement_mode())
     tempo = _estimate_tempo_from_midi_time(midi, notes)
     return out, left, right, tempo
 
@@ -912,7 +932,8 @@ def transcribe_stems_enhanced(stems, model_path, progress, out_dir=None):
     accomp = _build_accomp(other_notes, _in_gap, gaps, min_gap=0.8,
                            halluc=True, extra=other_extra)
 
-    midi_data, left, right = fuse_to_piano(melody, accomp)
+    midi_data, left, right = fuse_to_piano(
+        melody, accomp, arrangement=_arrangement_mode())
     return midi_data, left, right
 
 
@@ -992,7 +1013,8 @@ def fix_hand(hand, max_span=14, window=0.08, max_notes=4, mode="mix"):
     return [hand[k] for k in range(len(hand)) if keep[k]]
 
 
-def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
+def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08,
+                  arrangement="legacy"):
     """融合与修改：旋律(右)+伴奏(左) → 可弹钢琴 MIDI 与谱面数据。
 
     人手的物理限制（用户要求：手指最多只能跨八度到九度）：
@@ -1026,17 +1048,21 @@ def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
     right = _drop_tiny(_merge_melody_dups(melody_notes), min_len=0.06)
     left = _denoise_left(left, vel_floor_pct=30, max_len=0.22)
 
-    # 左手每时刻最多 1 音(只留最低音贝斯骨干)，伴奏不杂不乱
-    left = fix_hand(left, max_span=max_span, window=window, max_notes=1, mode="accomp")
+    # 演奏级编排保留低音+一个和声音；旧模式仍可严格只留低音。
+    left_limit = 2 if arrangement == "studio" else 1
+    left = fix_hand(left, max_span=max_span, window=window,
+                    max_notes=left_limit, mode="accomp")
     right = fix_hand(right, max_span=max_span, window=window, max_notes=3, mode="melody")
 
     # 时值整形：旋律/伴奏都保留自然时值(不截断，保留延长音与连音)，
     # 只做小间隙填补(legato 连贯)——截断会吃掉长音和跨小节连音
-    left = _shape_durations(left, trim_at_onset=False)
+    left = _shape_durations(left, trim_at_onset=arrangement == "studio")
     right = _shape_durations(right, trim_at_onset=False, legato_gap=0.06)
     # 消除同音高重叠(避免同音双响的“抖”)
     left = _fix_same_pitch_overlap(left)
     right = _fix_same_pitch_overlap(right)
+    if arrangement == "studio":
+        left = _collapse_octave_doubling(left)
 
     # 力度层次：伴奏(左手)默认比主旋律(右手)小 25%。
     # 两手先映射到同一基础区间(80~120)，再对左手整体 ×0.75
@@ -1392,8 +1418,10 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
     notes = _dejitter_melody(notes)
     left_raw = [n for n in notes if n[2] < split_pitch]
     right_raw = [n for n in notes if n[2] >= split_pitch]
+    studio = _arrangement_mode() == "studio"
     left = fix_hand(left_raw, max_span=max_span, window=window,
-                    max_notes=max_notes, mode="mix")
+                    max_notes=3 if studio else max_notes,
+                    mode="accomp" if studio else "mix")
     # 右手同样用 mode="mix"，与左手一致。
     #
     # 【t3-A 已弃用 —— 2026-09-20 回退】曾试过右手改 mode="melody"（最高音优先）。
@@ -1687,6 +1715,11 @@ def _accomp_boost_params():
     }
 
 
+def _arrangement_mode():
+    """默认使用演奏级编配；classic 仅用于旧版对照回归。"""
+    return "classic" if os.environ.get("TS_ARRANGEMENT", "studio") == "classic" else "studio"
+
+
 def _dedupe_near(notes, dt=0.06, dp=1):
     """去掉「同音高、起音几乎同时」的重复音（并入 other 轨识别结果时用）。"""
     out = []
@@ -1731,22 +1764,25 @@ def _build_accomp(other_notes, in_gap, gaps, min_gap=0.8, halluc=True, extra=Non
     单独识别出来的音并进来。**有人声段逐字节不变。**
     """
     p = _accomp_boost_params()
-    if not p['on']:
+    if not p['on'] or _arrangement_mode() == "classic":
         return _accomp_legacy(other_notes, in_gap, gaps,
                               min_gap=min_gap, halluc=halluc)
     sung = [n for n in other_notes if not in_gap(n[0])]
     instr = [n for n in other_notes if in_gap(n[0])]
     base = _filter_high_hallucination(sung) if halluc else sung
-    a = _sparsify_harmony(_suppress_pad_notes(base), min_gap=min_gap)
-    b = _sparsify_harmony(_suppress_pad_notes(instr, max_len=p['pad_len']),
-                          min_gap=max(0.05, min_gap * p['ratio']))
+    a = _sparsify_harmony_playable(_suppress_pad_notes(base),
+                                   min_gap=max(0.35, min_gap * 0.75))
+    b = _sparsify_harmony_playable(
+        _suppress_pad_notes(instr, max_len=p['pad_len']),
+        min_gap=max(0.05, min_gap * p['ratio']))
     if extra:
         # extra（other 轨单独识别）要先抽稀再并 —— 它是**原始识别输出**，
         # 密度可达 20+ 音/秒，直接倒进去会把无人声段灌爆。
         ex = [n for n in extra if in_gap(n[0])]
         if ex:
             b = _dedupe_near(
-                b + _sparsify_harmony(ex, min_gap=max(0.05, min_gap * p['ratio'])))
+                b + _sparsify_harmony_playable(
+                    ex, min_gap=max(0.05, min_gap * p['ratio'])))
     return sorted(a + b, key=lambda x: x[0])
 
 
@@ -2313,11 +2349,22 @@ def separate_stems(audio_path, out_dir, base, progress, shifts=1):
         wav = np.ascontiguousarray(wav)
         import torch
         wav = torch.from_numpy(wav)
+        if wav.numel() < 2 or not bool(torch.isfinite(wav).all()):
+            raise ValueError("音频为空或包含非有限采样值。")
         ref = wav.mean(0)
-        wav = (wav - ref.mean()) / ref.std()
+        center = ref.mean()
+        scale = ref.std()
+        # 反相立体声的 mono 均值可以为零，但左右声道仍有真实音乐。
+        # 只在这种退化情况下用全声道标准差，普通素材保持原归一化口径。
+        if not bool(torch.isfinite(scale)) or float(scale) < 1e-8:
+            scale = wav.std()
+        if not bool(torch.isfinite(scale)) or float(scale) < 1e-8:
+            progress("音频为静音或恒定电平，跳过音轨分离。")
+            return None
+        wav = (wav - center) / scale
         sources = apply_model(model, wav[None], shifts=shifts, split=True,
                               overlap=0.25, device="cpu", progress=False)[0]
-        sources = sources * ref.std() + ref.mean()
+        sources = sources * scale + center
 
         paths = {}
         for name, src in zip(model.sources, sources):
@@ -2386,6 +2433,51 @@ def _sparsify_harmony(notes, min_gap=0.35):
     if best is not None:
         out.append(best)
     return out
+
+
+def _sparsify_harmony_playable(notes, min_gap=0.55, max_notes=2,
+                               cluster_window=0.10):
+    """演奏级和声抽稀：保留低音骨架和一个有效和声音。
+
+    模型经常在同一和弦上输出重复泛音、八度影子和极近的重复起音。
+    这里先按时间聚类，再按低音、力度、时值和协和音程选最多两个
+    不同音高；比单音抽稀更还原，比全量保留更适合人弹。
+    """
+    if not notes:
+        return []
+    notes = sorted(notes, key=lambda x: (x[0], x[2], -x[3]))
+    out = []
+    i = 0
+    while i < len(notes):
+        anchor = notes[i][0]
+        bucket = []
+        j = i
+        while j < len(notes) and notes[j][0] - anchor < min_gap:
+            bucket.append(notes[j])
+            j += 1
+        chord = [n for n in bucket if n[0] - anchor <= cluster_window]
+        if not chord:
+            chord = [notes[i]]
+        by_pitch = {}
+        for n in chord:
+            old = by_pitch.get(n[2])
+            if old is None or (n[1] - n[0], n[3]) > (old[1] - old[0], old[3]):
+                by_pitch[n[2]] = n
+        uniq = list(by_pitch.values())
+        root = min(uniq, key=lambda n: (n[2], -n[3], -(n[1] - n[0])))
+        chosen = [root]
+        upper = [n for n in uniq if n is not root]
+        if upper and max_notes > 1:
+            root_pitch = root[2]
+
+            def upper_score(n, root_pitch=root_pitch):
+                interval = (n[2] - root_pitch) % 12
+                consonance = int(interval in (3, 4, 5, 7, 8, 9, 10))
+                return consonance, n[3], n[1] - n[0], -abs(n[2] - root_pitch)
+            chosen.append(max(upper, key=upper_score))
+        out.extend(sorted(chosen, key=lambda n: (n[0], n[2])))
+        i = max(i + 1, j)
+    return _dedupe_near(out, dt=cluster_window, dp=0)
 
 
 def _suppress_pad_notes(notes, max_len=0.7, min_pitch=62):
@@ -2648,7 +2740,8 @@ def transcribe_stems(stems, model_path, progress, out_dir=None):
     # 注意本路径不做 _filter_high_hallucination（沿旧行为，halluc=False）
     accomp = _build_accomp(other_notes, _in_gap, gaps, min_gap=0.9,
                            halluc=False, extra=other_extra)
-    midi_data, left, right = fuse_to_piano(melody, accomp)
+    midi_data, left, right = fuse_to_piano(
+        melody, accomp, arrangement=_arrangement_mode())
     return midi_data, left, right
 
 def _build_hand(name, notes, add_pedal=True):
@@ -2726,18 +2819,15 @@ def _xml_rest(dur, voice, staff):
             '      </note>']
 
 
-def _staff_lines(notes, bar, bar_div, voice, staff):
-    """生成一个 staff 在某小节的单声部音符/休止行。
+def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True):
+    """沿起止边界切分和弦，用延音线保留各音的独立时值。
 
     notes 元素为 (slot, pitch, dur, tie_start, tie_stop)，其中跨小节的
     长音已在写入前按小节线拆分(每段 ≤ bar_div)。
 
-    转谱数据存在真实的多声部叠加(同一 hand 里整小节持续和弦之上又叠加旋律音)。
-    单声部 MusicXML 无法线性叠加——原实现用“延音线豁免跳过”导致小节超时值，
-    MuseScore 整体静默崩溃。这里改为：同一槽位组成一个和弦(按音高去重、
-    组内时值统一)；若后续还有更早 onset 的重叠音符，把当前和弦截短到下一
-    onset。这样每小节恰好填满 bar_div，永不超时值、不崩溃，且所有音符起点
-    与跨小节延音线都保留(仅持续音缩短)。
+    旧实现遇到下一起音就截掉持续音，还把同起点短音拉长到和弦最长音。
+    这里以所有起音/结束时刻为边界：每段只写真正发声的音，跨段持续的
+    音连 tie，同音再起音不连 tie。单声部游标始终恰好填满小节。
     """
     # 本小节、按槽位分组；同槽位内按音高去重，保留时值最长者
     chords = {}   # slot_local -> {pitch: (dur, tie_start, tie_stop)}
@@ -2755,23 +2845,23 @@ def _staff_lines(notes, bar, bar_div, voice, staff):
         else:
             bucket[p] = (dur, t_s, t_e)
 
-    slots = sorted(chords)
+    events = [(sl, min(bar_div, sl + dur), p, ts, te)
+              for sl, bucket in chords.items()
+              for p, (dur, ts, te) in bucket.items() if dur > 0]
+    boundaries = sorted({0, bar_div} | {t for s, e, _p, _ts, _te in events
+                                        for t in (s, e)})
     out = []
-    covered = 0
-    for i, sl in enumerate(slots):
-        members = sorted(chords[sl].items(), key=lambda kv: kv[0])   # 按音高
-        grp_dur = max(d for _p, (d, _ts, _te) in members)
-        nxt = slots[i + 1] if i + 1 < len(slots) else bar_div
-        dur = max(1, min(grp_dur, nxt - sl))    # 截短以不越过下一 onset
-        if covered < sl:
-            out += _xml_rest(sl - covered, voice, staff)  # 连续空拍合并为一个休止
-            covered = sl
-        # 第一个为父音符，其余为 <chord/>，全部共享统一时值 dur(合法)
-        for k, (p, (_d, ts, te)) in enumerate(members):
-            out += _xml_note(p, dur, voice, staff, chord=(k > 0), tie_start=ts, tie_stop=te)
-        covered = sl + dur
-    if covered < bar_div:
-        out += _xml_rest(bar_div - covered, voice, staff)
+    for sl, end in zip(boundaries, boundaries[1:]):
+        members = sorted((p, s, e, ts, te) for s, e, p, ts, te in events
+                         if s <= sl < e)
+        if not members:
+            out += _xml_rest(end - sl, voice, staff)
+            continue
+        for k, (p, s, e, ts, te) in enumerate(members):
+            out += _xml_note(
+                p, end - sl, voice, staff, chord=(k > 0),
+                tie_start=with_ties and (e > end or ts),
+                tie_stop=with_ties and (s < sl or te))
     return out
 
 
@@ -2781,7 +2871,8 @@ def _total_bars(notes, bpm, bar_div=16):
     quarter = 60.0 / bpm
     if not notes:
         return 1
-    ends = [int(round(e / quarter * DIV)) for _s, e, _p, _v in notes]
+    ends = [max(int(round(s / quarter * DIV)) + 1,
+                int(round(e / quarter * DIV))) for s, e, _p, _v in notes]
     return max(1, (max(ends) + bar_div - 1) // bar_div)
 
 
@@ -2828,14 +2919,16 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
     bar_div = 16   # 4/4 每小节 = 16 个 16 分音符
 
     def to_div(t):
-        # 生成的中间声部保持 8 分音符粒度(谱面干净，无 16 分碎音)；
-        # 参考谱拼接小节由 splice 直接提供 16 分槽位，不受此限制
-        return int(round(t / quarter * DIV / 2.0)) * 2
+        # 十六分网格；不再把快速同音音节压成同一个八分槽位。
+        return max(0, int(round(t / quarter * DIV)))
 
     total_div = max(
-        [to_div(e) for _sign, _line, notes in hands for _s, e, _p, _v in notes] + [1]
+        [max(to_div(s) + 1, to_div(e))
+         for _sign, _line, notes in hands for s, e, _p, _v in notes] + [1]
     )
     n_calc = max(1, (total_div + bar_div - 1) // bar_div)
+    if splice:
+        n_calc = max(n_calc, max(splice) + 1)
     if n_bars is not None:
         n_calc = max(n_calc, int(n_bars))
 
@@ -2849,10 +2942,23 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
         终点在结束小节(给 stop)；中间段两者都有。注意 ed 用 (ed-1)//bar_div
         定位“最后一个发声的小节”，避免恰好结束在小节线上的音被误加 start。
         """
-        segs = []
+        # 量化之后同音高可能重叠；先在全局时间轴截到真正的再起音，
+        # 再拆小节，避免跨小节续音覆盖新的起音或留下孤儿 tie。
+        by_pitch = {}
         for s, e, p, _v in notes:
             sd = to_div(s)
             ed = max(sd + 1, to_div(e))
+            starts = by_pitch.setdefault(p, {})
+            starts[sd] = max(starts.get(sd, ed), ed)
+        quantized = []
+        for p, starts in by_pitch.items():
+            ordered = sorted(starts.items())
+            for i, (sd, ed) in enumerate(ordered):
+                if i + 1 < len(ordered):
+                    ed = min(ed, ordered[i + 1][0])
+                quantized.append((sd, ed, p))
+        segs = []
+        for sd, ed, p in sorted(quantized):
             b0 = sd // bar_div
             b1 = (ed - 1) // bar_div
             for b in range(b0, b1 + 1):
@@ -2901,6 +3007,13 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
                 num = f' number="{i}"' if n_hands > 1 else ""
                 X.append(f'        <clef{num}><sign>{sign}</sign><line>{line}</line></clef>')
             X.append('      </attributes>')
+            X += ['      <direction placement="above">',
+                  '        <direction-type><metronome>',
+                  '          <beat-unit>quarter</beat-unit>',
+                  f'          <per-minute>{bpm:g}</per-minute>',
+                  '        </metronome></direction-type>',
+                  f'        <sound tempo="{bpm:g}"/>',
+                  '      </direction>']
         # 强弱记号：按本小节平均力度映射 p/mp/mf/f/ff，
         # 只有力度档位变化时才标注(谱面干净不啰嗦)
         bar_start = bar * bar_dur
@@ -2913,11 +3026,13 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
                     last_dyn[i] = sym
                     X += _xml_direction(sym, i, n_hands)
         for i, (_sign, _line, segs) in enumerate(hands_norm, start=1):
+            if i > 1:
+                X.append(f'      <backup><duration>{bar_div}</duration></backup>')
             if splice and bar in splice and i in splice[bar]:
                 # 参考谱拼接小节: 直接按 16 分槽位写入
-                X += _staff_lines(splice[bar][i], bar, bar_div, i, i)
+                X += _staff_lines(splice[bar][i], bar, bar_div, i, i, with_ties=with_ties)
             else:
-                X += _staff_lines(segs, bar, bar_div, i, i)
+                X += _staff_lines(segs, bar, bar_div, i, i, with_ties=with_ties)
         X.append('    </measure>')
     X.append('  </part>')
     X.append('</score-partwise>')
@@ -3770,6 +3885,11 @@ class App:
             text='AI 智能识别增强(重点识别和弦，比 MT3 快约 6 倍；'
                  '人声/贝斯用快速引擎)',
             variable=self.mt3_var, style='Card.TCheckbutton').pack(anchor='w', pady=2)
+        ttk.Label(
+            opt_inner,
+            text='默认编配：演奏级（低音骨架 + 必要和声，去掉重复八度与重叠长音）。'
+                 '兼容旧版可设置 TS_ARRANGEMENT=classic。',
+            style='CardMuted.TLabel').pack(anchor='w', pady=(4, 0))
 
         mid = ttk.Frame(self.root, style='TFrame')
         mid.pack(fill='x', padx=20, pady=(8, 0))

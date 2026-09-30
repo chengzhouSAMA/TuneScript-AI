@@ -38,6 +38,8 @@ CHECKS = [
      [PY, 'lang_dev/_strip_persona.py', '--check', '--selftest'], 10),
     ('unit', 'fast', '核心编排单元自检 111 项',
      [PY, 'lang_dev/_test_handgap_accomp.py'], 20),
+    ('fidelity', 'fast', '音符解码与谱面保真（含阴性对照）',
+     [PY, 'lang_dev/_test_fidelity.py'], 20),
     ('gui', 'fast', 'GUI 接线 0 问题',
      [PY, 'lang_dev/_check_gui.py'], 10),
     ('floor', 'task', '地板守卫（F1~F6）',
@@ -50,9 +52,9 @@ CHECKS = [
      [PY, 'lang_dev/_check_pushguard.py'], 30),
     ('cli_contract', 'task', '--cli 退出码与输出契约 23 项',
      [PY, 'lang_dev/_check_cli_contract.py'], 120),
-    ('selfcheck', 'task', '归档/冻结基线 99 项',
+    ('selfcheck', 'task', '归档/冻结基线 104 项',
      [PY, 'lang_dev/_selfcheck.py'], 120),
-    ('verify_exe', 'full', '出货 exe 的内容层 57 项',
+    ('verify_exe', 'full', '出货 exe 的内容层 61 项',
      [PY, 'lang_dev/_verify_exe.py'], 300),
     ('tree_sync_strict', 'full', '克隆不落后于工作区（出货前必查）',
      [PY, 'lang_dev/_check_tree_sync.py', '--strict'], 30),
@@ -61,7 +63,7 @@ CHECKS = [
 ]
 STAGES = ['fast', 'task', 'full']
 SKIP_DIRS = {'lang_id_venv', 'lang_id_venv314', '__pycache__', '_gh_repo',
-             '备份', '回归验收', '_work', 'build', 'dist', '.git'}
+             '备份', '回归验收', '_work', 'build', 'dist', 'promo_video', '.git'}
 
 
 def syntax_ok():

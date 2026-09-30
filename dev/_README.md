@@ -3042,3 +3042,93 @@ C3+E3+G3 三和弦保留、相隔 93ms 的根音/八度交替保留、右手一�
 intrinsic-height fit 时，desktop Reader 既不能收窄也不能纵向滚动，会判
 `composition/viewport-height`（`renderers/shared/desktop-readability.mjs`）。
 宽度上限则是别处算出来的 1240px（8px 源字号 × 930/1240 = 6.0px 投影下限）。
+
+## 148. 过夜那一批：音频/制谱保真 + 演奏级编配（studio）
+
+⚠️ **先说明归属**：本节记录的是**另一个会话在 09-30 21:21 ~ 10-01 04:49 做的改动**。
+它做完没有同步、没有提交，只留下工作区 + 两个候选 exe + 六条回归结果。我这一轮做的事是：
+把它的 diff 取证、补完遗漏的登记、把候选提升为出货版并重跑验证 —— 所以下面的数据来自
+"读它的产物"，不是我重新实现。辨别"装的是哪一版"的方法见 148.4。
+
+### 148.1 音频/制谱保真（→ `dist/fidelity_candidate`，01:10）
+
+| 位置 | 旧行为 → 新行为 |
+|---|---|
+| `transcriber_app.py:578` `decode_to_wav` | `-ac 1 -ar 22050 -sample_fmt s16`（在 Demucs 之前就永久丢掉立体声与高频）→ `-map 0:a:0 -vn -c:a pcm_f32le` 保留原采样率/声道/浮点；失败判定从"文件存在且非空"改成 `returncode != 0 or not _valid_wav` |
+| `:675` `_mido_to_notes` | 单轨 `sec_per_tick` 匀速换算、力度硬写 80 → `merge_tracks` 全局变速时间轴（认 `set_tempo`）、零力度 note_on 当 note_off、同通道同音高 FIFO 配对、跳过鼓通道(ch9)、保留原力度；**拒绝** type 2 异步轨与 SMPTE（原来会静默算错） |
+| Demucs 归一化 | `(wav - ref.mean())/ref.std()` → 加退化保护：反相立体声时 mono 均值恰为零，回退全声道 std；静音/恒定电平直接跳过分离 |
+| `:2822` `_staff_lines` | "遇到下一起音就截断持续音 + 组内时值统一拉长" → 以**所有起音/结束时刻**为边界逐段只写真正发声的音，跨段用 tie、同音再起音不连 tie |
+| `:2923` `build_score_xml` | 量化粒度八分（`round(t/quarter*DIV/2)*2`）→ **十六分**（`int(round(t/quarter*DIV))`） |
+| `:2868` `_total_bars` | 短音可能算出 0 格 → 起止至少留 1 格 |
+| 小节级 | 补 `<backup>`（两个 stave 不再被 MuseScore 当成一个声部叠加）+ 每小节节拍标记 |
+
+### 148.2 演奏级编配 studio / classic（→ `dist/studio_candidate`，04:49）
+
+- `:1718` **`_arrangement_mode()`** —— 默认 `studio`，`TS_ARRANGEMENT=classic` 回退
+- `:2438` **`_sparsify_harmony_playable()`** —— 抽稀从"每 min_gap 留一个音"改成
+  "低音 + 一个协和和声音"（先按 0.10s 聚簇去同音高，再按协和音程/力度/时值打分选上声部）
+- `:1052` 左手 `max_notes` 1 → 2（studio）；`trim_at_onset=arrangement=="studio"`；
+  studio 时调用 §147 那轮加的 `_collapse_octave_doubling`
+- `:1421` `_simple_piano` studio 时左手 `mode="accomp"`、最多 3 音
+- `:1767` `_build_accomp` classic 走 `_accomp_legacy`
+- `ui_app.py:404` + 主界面加提示：默认演奏级
+
+### 148.3 过夜跑的六条回归
+
+| 曲目 | 档位 | sim | cost | n_notes | frag |
+|---|---|---|---|---|---|
+| fanwut | studio（no-reheat） | 0.8339 | 0.1816 | 640 | 0.01094 |
+| fanwut | classic（no-reheat） | 0.8211 | 0.1972 | 552 | 0.01087 |
+| fanwut | studio（full） | 0.8954 | 0.1105 | 1621 | 0.00864 |
+| jiabin | studio（full） | 0.9412 | 0.0606 | 2548 | 0.00314 |
+| shiki | studio（full） | 0.8833 | 0.1241 | 947 | 0.00950 |
+| shiki | classic（full） | 0.8833 | 0.1241 | 947 | 0.00950 |
+
+两条必须写下来：
+
+- **studio 只在 fanwut 上真正生效**（sim +0.013、音数 552→640）。jiabin 与 §147 那轮
+  （0.9412 / 2554 音）几乎一致；**shiki 两档四项指标完全相同**（sim 到小数点后 16 位一致），
+  等于这一档在 shiki 上没产生任何差别。在把 studio 定为默认档之前，这个样本量偏薄。
+- classic 档存在的意义就是这条对照臂：**没有 A/B 就不要改默认**。
+
+### 148.4 收尾（这一轮做的事）
+
+- `lang_dev/_selfcheck.py` 补登一行 `min_gap=min_gap, halluc=halluc)`。它在 difflib 口径下
+  算"被删的行"，在 git 口径下是上下文 —— `transcriber_app.py:1769` 与备份 `:1754`
+  **逐字节相同**，是 difflib 在 CRLF/LF 混用文件上的对齐伪影（git 用 Myers，两者对
+  同一处给出不同对齐）。成因写在登记项旁边的注释里。
+- **★ 把被换掉的断言按名字恢复回来。** 把过夜改动同步进克隆后，地板守卫 F3 报出：
+  `dev/_selfcheck.py 删掉了一条断言：check("自上次备份以来包含本轮声明的轨优先级实现",`。
+  原因不是有人手滑，而是**按 diff 判的断言会随基线前移而静默失效**：新基线一建立，
+  上一轮的符号就落进基线之前、不在 `joined` 里，于是那条被**整条替换**成了 studio 那条。
+  替换不是"换个检查对象"，是拉低棘轮 —— 断言从此不存在了。
+  修法：**名字原样恢复**（F3 是按断言文本前 60 字判身份的，改名就等于删除），判据改成
+  **当前源码里还在不在**（`_src`，不依赖基线位置）；另外加一张 `_prior_rounds` 清单，
+  把 R1 / R2 / 间奏补音 / 左手去八度也一并按源码内容判，**只增不减**。
+  → `selfcheck` 99 → **104/104**，地板守卫回到 **0 条**。
+- `lang_dev/_verify_exe.py` 的 `WANT_MAIN` 补 4 项：`TS_ARRANGEMENT`、
+  `_sparsify_harmony_playable`、`_arrangement_mode`、`pcm_f32le`。
+  **这是本轮最关键的一处收尾**：在那之前，出货 exe 与两个候选 exe **都能过 57 项** ——
+  验证器分辨不出装的是哪一版源码，也就无法证明"这一版真的打进去了"。
+  阴性对照：补完之后拿旧出货 exe 跑 → `检查 61 项，4 问题`（4 项全缺）。
+- `.gitignore` 加 `promo_video/`。
+- 候选提升为出货版（内容层 61 项 0 问题），旧的 547.8 MB 退到 `_backup_`。
+
+**顺手更正我自己先前的一个误判**：我说过 `promo_video/测试用曲/` 里 2.27 GB 版权音频
+会跟着 `git add .` 进公共仓库 —— **不对**。`.gitignore:24` 早就有 `*.flac`，
+音频一直是被挡住的。真正没被挡的是 pip 装的 `dependencies/`（1967 个文件 / 73.8 MB）、
+5 个 mp4（46.5 MB）和约 50 张分镜图 —— 所以 `promo_video/` 整目录忽略仍然值得加。
+
+### 148.5 出货 exe
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 550.2 MB |
+| sha256 | `16E5E2D7C48C64A0521B8EC6C37B186E56D64A57B3F1E4738892A179DE7E4FFD` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`，§147 那一版） |
+| 归档校验 | `_verify_exe.py` **61 项 0 问题** |
+| 合并了两批 | 保真 + studio 都在同一个 exe 里：`pcm_f32le` 与 `TS_ARRANGEMENT` 同时命中 |
+
+⚠️ 两个从 `dist/fidelity_candidate/` 启动的实例自 01:44 起一直在跑（PID 14028 / 38796），
+**没有动它们**（规矩：绝不静默杀掉正在跑的实例）。`fidelity_candidate/` 因此原样留着。

@@ -402,7 +402,7 @@ class TranscribePage(Page):
         self.outdir_entry = field(g, 4, '输出目录', self.outdir_var, 'dir')
 
         _o2, c2 = card(self.body)
-        section(c2, '选项', '默认值已经够用；不确定就别改。')
+        section(c2, '选项', '默认使用演奏级编排：保留必要和声，但主动去掉重复音和不可弹的堆叠。')
         self.sep_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.sep_var,
                         text='人声/伴奏分离分析（更准更干净，约多花几分钟；'

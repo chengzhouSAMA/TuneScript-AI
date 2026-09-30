@@ -26,6 +26,12 @@ mt3/
 *_五线谱.pdf
 *_大谱表.xml
 
+# 宣传片工作区（本地素材，不是出货源码）
+# 音频已经被上面的 *.flac/*.wav/*.mp3 挡住，但这里还有 pip 装的
+# dependencies/（1967 个文件 / 73.8 MB）、5 个 mp4、约 50 张分镜图 ——
+# 整目录忽略，别让它们跟着 `git add .` 进公共仓库。
+promo_video/
+
 # 网易云 cookie（本地自用，绝不入库）
 netease_cookie.txt
 

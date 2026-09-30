@@ -115,7 +115,9 @@ TuneScript AI V0.5.1.exe --cli --audio 歌曲.flac --outdir ./输出
 ```
 
 人声轨走 Basic Pitch 出右手旋律，伴奏轨合并后走 ByteDance 和弦识别出左手和声。
-碎音合并、左右手分离（左手降到 C4 以下）、力度分层、延音踏板都在 `fuse_to_piano` 里。
+默认采用“演奏级编配”：左手保留低音骨架和必要和声，去除重复八度、同音重叠和
+不可弹的堆叠；碎音合并、左右手分离（左手降到 C4 以下）、力度分层、延音踏板都在
+`fuse_to_piano` 里。需要复现旧版单音伴奏时设置 `TS_ARRANGEMENT=classic`。
 
 渲染这块比较小心：MuseScore 有时崩溃退出但其实已经把文件写好了，所以产物一律按魔数
 （`%PDF` / `MThd` / `RIFF`）判断，不看退出码。PDF 渲染失败会自动降级重试。
