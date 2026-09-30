@@ -23,13 +23,11 @@ def main():
     import asr_refine as AR
     import en_phoneme as EP
     import lyrics_fetch as LF
-    import lyrics_match as LM
 
     voc = os.path.join(ROOT, "lang_dev", "_out_en", "Hello - Adele_vocals.wav")
     if not os.path.isfile(voc):
         print("缺 %s，先跑 lang_dev/_test_en_phonetics.py" % voc)
         return 2
-    dur = 30.0
     spans = [[0.0, 10.0], [10.0, 20.0], [20.0, 30.0]]
 
     print("=" * 74)

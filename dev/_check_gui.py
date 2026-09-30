@@ -6,7 +6,6 @@ GUI 改动最容易出的问题是**网格 row 冲突**和**回调形参没同�
 
 用法: python lang_dev/_check_gui.py
 """
-import ast
 import os
 import re
 import sys
@@ -17,7 +16,6 @@ SRC = os.path.join(ROOT, "transcriber_app.py")
 
 def main():
     s = open(SRC, encoding="utf-8").read()
-    tree = ast.parse(s)
     bad = 0
 
     print("=== 1) 输入区网格 row 分配 ===")

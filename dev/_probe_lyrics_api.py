@@ -123,7 +123,7 @@ def main():
                      "album": (first.get("album") or {}).get("name")},
                      ensure_ascii=False)[:110] if first else "(无)"))
     sid = None
-    for _t, c, n, f in ns:
+    for _t, _c, _n, f in ns:
         if isinstance(f, dict) and f.get("id"):
             sid = f["id"]
             break

@@ -2809,3 +2809,129 @@ B 站取音频**单独 try/except**（`fetch_audio` 是抛异常不是返回 Non
 
 教训写在这里，因为它是可复发的：**凡是"要上传的检查工具"，它自己的词表/模式表
 都不能写字面量** —— 检查器一旦入库，它就是被检查的对象之一。
+
+---
+
+# 从 Zero 仓库学到的三条（2026-09-25 第八轮）
+
+读了 `terminal-creator/ClaudeCode-Python`（「Zero」，5138 行 Python 还原 CC 的 agent 运行时，
+66 文件 + 218 测试）。它是 agent runtime，本项目是批处理媒体管线 —— `core/`、`api/`、
+`mcp/`、`skills/`、`memory/` 整块**不适用**，不照搬。挑出三条能落地的，按价值做。
+
+## 142. 异常消息带上真实原因（它 6 处，我们 15 处）
+
+Zero 的 `query_loop.py` 特意写了两条：非可恢复时 `yield` **真实错误**而不是 "max turns"；
+耗尽重试时**报最后一次真实错误**。
+
+本项目原来有 **15 处只打 `type(e).__name__`**（`transcriber_app.py` 10、`ui_app.py` 4、
+`lang_pipeline.py` 1），全是优雅降级路径 —— 用户只看到
+
+```
+伴奏合并不可用(KeyError)，回退最响单轨。
+音轨分离不可用(RuntimeError)，改用整体分析。
+```
+
+**永远不知道"为什么"**。现在统一成 `{类型}: {消息}`；GUI 状态行限长 120 字符
+（别把一长串异常糊到标签上）。这一轮我自己调 QR 那部分时就吃过这个亏。
+
+## 143. ★ ruff 上线第一天就抓到一个真 bug
+
+`ruff.toml`（新文件）只挑**真会出错**的规则（E9/F63/F7/F82/F811/F401/F841/E722/B），
+**不选任何格式类规则**（E501/W/E1/E2/E3）—— 格式会造出几百行无意义 diff。
+
+第一次跑就报 8 条，其中一条不是风格问题：
+
+```
+transcriber_app.py:3854:65: F821 Undefined name `e`
+```
+
+```python
+except Exception as e:
+    win.after(0, lambda: st.set('获取二维码失败：%s' % type(e).__name__))
+```
+
+**`except ... as e` 在块结束时会把 `e` 解绑**（Python 3 的既定行为），而 lambda 是
+`win.after` 稍后才跑的 —— 真到那一步，报的不是二维码失败，是 `NameError`。
+改成当场把消息取出来：
+
+```python
+    _m = '获取二维码失败：%s: %s' % (type(e).__name__, str(e)[:120])
+    win.after(0, lambda _m=_m: st.set(_m))
+```
+
+同类的"late binding + except 作用域"陷阱，在这个项目里只有这一处，但值得记住。
+
+**顺带清掉的**：7 个未使用 import、6 处无用局部变量、8 处解包变量未用、1 处
+`raise ... from`。其中 `ja_romaji.from_char_times` 里
+
+```python
+kana = text_to_kana(text)     # 死代码：循环里每个字符都重新算一次 morae_of(sub)
+```
+
+是**白跑一遍 pykakasi**（那个函数用 pykakasi，慢）。删掉后 `text` 参数也成了未用 ——
+但它和 `en_phoneme.from_char_times` 是**共用签名**（`asr_refine.py` 对两者同一套调用），
+所以参数保留，只把死计算删掉并写明原因。
+
+⚙️ 用 `ruff --fix` 只自动修了 import（安全）；其余逐条看上下文再改 ——
+`F841` 在出货代码里可能意味着"忘了用"，不是"多余"，必须先读。
+
+## 144. 仓库里有、工作区没有的文件 —— 这类文件自检扫不到
+
+`lang_dev/_check_tree_sync.py`（新）：比对 `_gh_repo` 受控文件与工作区，列出差集。
+
+原来有 **3 个**：`.gitignore`、`README.txt`、`requirements.txt`
+（`README.md` 上一轮刚补）。这些文件**只活在克隆里** ⇒ 工作区那一整套自检
+（称呼扫描、ruff、语法检查）**全都扫不到它们**，想改只能直接进克隆改，
+于是永远脱离覆盖。现在工作区是完整的："仓库受控文件 78 个；工作区缺 0 个"。
+
+顺带修掉 `.gitignore` 里一行**早就坏了的**注释：那一行是 GBK 字节混在 UTF-8 文件里，
+显示成 `# ��������ʱ���ɵġ����� cookie��ģ��…`。已还原成
+`# 构建期临时生成的「烤入 cookie」模块（打包结束即删，绝不入库）`。
+（其余 34 行与仓库原文件逐字节一致，只有这一行变。）
+
+⚠️ 一个坑记下来：`git ls-files` 默认会把非 ASCII 文件名转义成 `"\351\237\263…"`，
+于是中文名的 3 个 `.spec` 全被误报成"缺失"。必须加 `-c core.quotepath=false`。
+
+### 144.1 手写复制列表错了第二次 —— 改成工具
+
+补完那 3 个文件之后同步进克隆时，**我又漏了两个**：`en_phoneme.py` / `bilibili.py`
+（以及 5 个 dev 脚本和 `CONSTRAINTS.md`）。表现是克隆里还留着未清理的旧版本 ——
+`ruff` 对着克隆跑仍然报 3 条。**同一类错误两次**：靠人肉维护"该复制哪些文件"记不住。
+
+所以加了 `lang_dev/_sync_repo.py`：按 `git ls-files` **自动推导**方向，
+仓库里有的就从工作区刷一遍，只同步 sha 不同的。第一次跑就补上了另外 8 个。
+
+同时 `_check_tree_sync.py` 现在除了"工作区缺"还查"**克隆落后**"：
+
+- 默认：只提示不报红（干活途中"工作区新、克隆旧"是正常状态，
+  报红了就会被无视）
+- `--strict`：落后也算失败 —— `check.py --stage full` 用它，**出货前必查**
+
+现在 fast 6 项、task 12 项、full 15 项，全绿。
+
+## 145. 出货 exe
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 547.8 MB |
+| sha256 | `C70A3C2ECA1B2B4784EA6AD04342DAB9B0283096B670BC70AC9E520A7488415B` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `F08D411D…`） |
+| 归档校验 | `_verify_exe.py` 56 项 0 问题；`check.py --stage full` 14/14 全绿（含冒烟两臂） |
+
+**必须重打**：改的是用户可见的错误文案，不是注释。
+
+## 146. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `transcriber_app.py` | 10 处错误消息补 `str(e)`；修掉 `e` 被 lambda 捕获的 NameError；删死代码 `t = gs` / `best_off` / 冗余 import |
+| `ui_app.py` / `lang_pipeline.py` | 各 4 处 / 1 处错误消息补 `str(e)`（GUI 行限长 120） |
+| `ja_romaji.py` | 删掉白跑一遍 pykakasi 的死计算；说明 `text` 参数为何保留 |
+| `lyrics_match.py` | 删掉链式赋值里没用到的 `LF_rank` |
+| `ruff.toml` | **新增**：只挑真 bug 类规则，选中项与排除项都写了原因 |
+| `lang_dev/_check_tree_sync.py` | **新增**：仓库/工作区文件差集 + 克隆落后检测（`--strict` 出货用） |
+| `lang_dev/_sync_repo.py` | **新增**：按 `git ls-files` 自动把工作区刷进克隆（手写复制列表错过两次） |
+| `lang_dev/check.py` | fast 档接入 `ruff` 与 `tree_sync`，full 档加 `tree_sync_strict`（fast 6 / task 12 / full 15） |
+| `.gitignore` / `README.txt` / `requirements.txt` | **新增到工作区**（以前只在克隆里） |
+| `lang_dev/_selfcheck.py` / `_strip_persona.py` / `_floor_guard.py` / `_check_gui.py` / `_measure_handgap.py` / `_trim_comments.py` / `_test_en_align.py` / `_diag_frag_interlude.py` / `_probe_lyrics_api.py` / `_setup_sidecar.py` | ruff 清理（未用 import / 未用局部 / 解包变量） |

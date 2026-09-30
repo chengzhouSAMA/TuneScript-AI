@@ -164,7 +164,8 @@ def transcribe_vocal_by_language(vocal_wav, transcribe_fn, progress=None,
                 shutil.rmtree(tmp, ignore_errors=True)
     except Exception as e:
         info["reason"] = "异常退化：%s: %s" % (type(e).__name__, str(e)[:160])
-        log("语种分段不可用（%s），按整轨识别。" % type(e).__name__)
+        log("语种分段不可用（%s: %s），按整轨识别。"
+                        % (type(e).__name__, str(e)[:160]))
         try:
             return whole()
         except Exception:

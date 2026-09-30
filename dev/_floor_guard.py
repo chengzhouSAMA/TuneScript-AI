@@ -199,7 +199,7 @@ def scan(added, removed):
     for f, raw in added:
         if is_code(f) and any(t in f for t in TEST_FILES):
             line = _strip_strings(raw)
-            for pat, name in SKIP:
+            for pat, _name in SKIP:
                 if re.search(pat, line):
                     add('F3 测试被削弱', f, '新增跳过：%s' % raw.strip()[:70])
     for f, line in removed:

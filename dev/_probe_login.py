@@ -9,8 +9,6 @@
 用法: python lang_dev/_probe_login.py [--cookie "MUSIC_U=..."]
 """
 import argparse
-import hashlib
-import json
 import os
 import sys
 

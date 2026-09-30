@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Bilibili 音频下载(无 Cookie) —— 供 TuneScript AI 输入 BV 号直接扒谱。"""
-import os
 import requests
 
 HEADERS = {

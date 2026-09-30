@@ -1,0 +1,44 @@
+# ruff 配置 —— 只挑"真会出错"的规则，**不碰格式**。
+#
+# 为什么现在才有：本项目此前一行静态检查都没有（主文件 4160 行）。
+# 参考 Zero（ClaudeCode-Python）的 Makefile —— 它有 lint/typecheck/test 三段。
+#
+# 上线第一天就跑出 8 个问题，其中一个是**真 bug**：
+# `except ... as e:` 块里把 `e` 留给 `win.after(...)` 的回调用 ——
+# Python 在 except 结束时就解绑 `e`，回调跑起来只会 NameError。
+#
+# ⚠️ 不要往代码里写 `# noqa` —— 地板守卫（dev/_floor_guard.py）会拦。
+#    要放过某条规则，写进下面的 per-file-ignores，并把原因写在旁边。
+
+target-version = "py39"      # 主环境是 3.9（Qwen 侧车另起 3.14，见 lang_id_venv314/）
+line-length = 110
+
+exclude = [
+    ".git", ".git-credentials", "__pycache__",
+    "ai_transcriber_dev",    # 早期训练实验，不参与出货
+    "备份", "转谱验证", "回归验收",
+    "_gh_repo",              # 推送用的克隆，与工作区同一份代码
+    "lang_id_venv", "lang_id_venv314", "dist", "build", "build_new",
+    "TuneScript-AI",         # V0.1 时期留下的旧快照（.git 已丢），不是本项目的一份
+    # 工作区根上的一次性分析/验证脚本：不入库，也没人维护
+    "_vfy_*.py", "_probe_*.py", "_diag_*.py", "_run_*.py",
+    "_desktop_*.py", "_slice_*.py",
+]
+# ⚠️ `回归验收` 整个被排除了，但里面有一个**要入库**的文件：regress_one.py。
+#    check.py 会把它按显式路径单独传给 ruff —— ruff 默认检查命令行上显式给出的
+#    文件，即使它命中 exclude（除非加 --force-exclude）。
+
+[lint]
+select = [
+    "E9",     # 语法错 / 运行时必炸
+    "F63",    # 无效的字符串前缀
+    "F7",     # 语法层面就错
+    "F82",    # 未定义名字（这条抓到过真 bug）
+    "F811",   # 重复定义
+    "F401",   # 未使用 import
+    "F841",   # 赋值后没用
+    "E722",   # 裸 except
+    "B",      # bugbear：真 bug 概率高的一批
+]
+# 没选 E501/W/E1/E2/E3：那是**格式**，会造出几百行无意义 diff。
+# 要做格式化就单独跑 `ruff format`，别混进 lint。

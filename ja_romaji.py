@@ -11,7 +11,6 @@ r = analyze("さようなら")
 CLI: python ja_romaji.py --text "バカみたいにほら愛してたくせに"
 python ja_romaji.py --file lyrics.txt
 """
-import os
 import re
 import sys
 import unicodedata
@@ -235,9 +234,11 @@ def distribute(morae, t0, t1):
 
 
 def from_char_times(text, char_times, t0=0.0):
-    """用**字符级时间戳**（强制对齐结果）给摩拉定时。"""
-    kana = text_to_kana(text)
-    morae = morae_of(kana)
+    """用**字符级时间戳**（强制对齐结果）给摩拉定时。
+
+    `text` 只为了跟 `en_phoneme.from_char_times` 保持同一个签名（`asr_refine.py`
+    对两者是同一套调用），这里的定时完全从 `char_times` 推出来，用不到它。
+    """
     out = []
     k = 0
     for (ch, s, e) in char_times:

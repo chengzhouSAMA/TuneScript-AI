@@ -52,7 +52,7 @@ def status():
             print("  %-24s 联接 → %s" % (name, os.path.realpath(p)))
         else:
             print("  %-24s 实体目录（非联接）%s" % (name, what))
-    for name, what in FILES:
+    for name, _what in FILES:
         p = os.path.join(DIST, name)
         print("  %-24s %s" % (name, "存在" if os.path.exists(p) else "缺失"))
     exe = os.path.join(DIST, "TuneScript AI V0.5.1.exe")

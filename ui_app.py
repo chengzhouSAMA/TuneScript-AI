@@ -17,7 +17,6 @@
 
 所有功能模块都是**惰性导入**（点开页面/点按钮才 import），所以新 UI 不会拖慢启动。
 """
-import json
 import os
 import sys
 import threading
@@ -309,7 +308,8 @@ def qr_login_dialog(parent, on_success=None):
         try:
             draw(NL.qr_matrix(NL.qr_url(unikey)))
         except Exception as e:
-            st.set('生成二维码图片失败：%s' % type(e).__name__)
+            st.set('生成二维码图片失败：%s: %s'
+                   % (type(e).__name__, str(e)[:120]))
             add_log('画二维码失败：%s' % e)
             return
         st.set('请用网易云音乐 App 扫码（没人扫就一直有效，真过期会自动换新的）')
@@ -322,7 +322,8 @@ def qr_login_dialog(parent, on_success=None):
         try:
             code, cookie, msg = NL.poll_qr_key(unikey)
         except Exception as e:
-            st.set('轮询失败（%s），2.5 秒后重试…' % type(e).__name__)
+            st.set('轮询失败（%s: %s），2.5 秒后重试…'
+                       % (type(e).__name__, str(e)[:120]))
             add_log('轮询异常：%s' % e)
             win.after(2500, lambda: poll(gen, unikey))
             return
@@ -996,7 +997,8 @@ class EnvPage(Page):
                 lines.append('语种识别后端：auto → %s（可用：%s）'
                              % (LI.auto_backend_name(), ', '.join(LI.list_backends())))
             except Exception as e:
-                lines.append('语种识别：不可用（%s）' % type(e).__name__)
+                lines.append('语种识别：不可用（%s: %s）'
+                         % (type(e).__name__, str(e)[:120]))
             try:
                 import netease_login as NL
                 info = NL.account_info()
@@ -1008,7 +1010,8 @@ class EnvPage(Page):
                     lines.append('网易云：未登录（cookie 来源 %s）—— %s'
                                  % (src, info.get('reason') or '免登录最高 320kbps'))
             except Exception as e:
-                lines.append('网易云：模块不可用（%s）' % type(e).__name__)
+                lines.append('网易云：模块不可用（%s: %s）'
+                         % (type(e).__name__, str(e)[:120]))
             return '\n'.join(lines)
 
         def done(r):

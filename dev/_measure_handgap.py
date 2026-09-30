@@ -136,8 +136,6 @@ def run_arm(ta, key, arm):
 
     t_end = max([e for _s, e, _p, _v in left + right] + [0.0])
     sung = complement(gaps, t_end)
-    gap_notes = [n for n in accomp if any(a <= n[0] < b for a, b in gaps)]
-    sung_notes = [n for n in accomp if not any(a <= n[0] < b for a, b in gaps)]
 
     r1gap = ta._hand_gap_min(left, right)
     return {

@@ -19,7 +19,6 @@ import sys
 import tempfile
 import types
 
-import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -163,6 +162,31 @@ def main():
             "save_path=os.path.join(args.outdir, f'{args.bvid}.m4a'),",
             "progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}",
             "or '未知原因')))",
+        )
+        # 本轮（2026-09-25 第八轮）：异常消息补 str(e) + ruff 清理。
+        # 被改掉的是"只报 type(e).__name__"的旧文案，以及 ruff 判定的
+        # 未使用 import / 无用局部变量 / 死代码。同样按行内容登记。
+        known_del += (
+            '伴奏合并不可用({type(e).__name__})',
+            '音轨分离不可用({type(e).__name__})',
+            '间奏补音不可用(%s)，保留原结果',
+            '人声接入不可用({type(_e3).__name__})',
+            '右手补音不可用({type(_e4).__name__})',
+            '间奏补右手不可用(%s)，保留原结果',
+            '音域分离不可用(%s)，保留原结果',
+            '网易云登录状态未知（%s）',
+            '轮询失败（%s），重试中',
+            "获取二维码失败：%s' % type(e).__name__",
+            'from mt3_infer import load_model',
+            'from pretty_midi import PrettyMIDI',
+            'import bisect',
+            '(s2, e2, _p2, _v2) in zip(vs, vs[1:])',
+            't = gs',
+            'for name, c in cands:',
+            'bad, off = _beat_alignment_score',
+            'best_off = 1.0, float(tempo)',
+            'best_bad, best_t, best_off = bad',
+            '（五线谱 PDF 与 MIDI 已生成',
         )
         # 删掉**纯注释行或空行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。

@@ -166,7 +166,7 @@ def _main(argv=None):
          else LF.parse_song_meta(a.from_file)["query"])
     cands = LF.dedup_candidates(LF.search_and_fetch(q, limit=a.limit))
     print("候选 %d 个，逐个打分：" % len(cands))
-    best, ranked = LF_rank = pick_best_candidate(asr_all, cands)
+    best, ranked = pick_best_candidate(asr_all, cands)
     for c, sc in ranked:
         mark = " <== 选中" if (best is not None and c is best) else ""
         print("   %-8s %-26s 行数=%-4s 起点=%-7s score=%.3f (whole=%.3f window=%.3f)%s"

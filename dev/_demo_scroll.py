@@ -6,7 +6,6 @@
 import argparse
 import os
 import sys
-import time
 import tkinter as tk
 
 HERE = os.path.dirname(os.path.abspath(__file__))

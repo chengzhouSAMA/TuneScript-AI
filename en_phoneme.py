@@ -25,7 +25,6 @@
 CLI:
     python en_phoneme.py --text "Hello, it's me"
 """
-import os
 import re
 import sys
 

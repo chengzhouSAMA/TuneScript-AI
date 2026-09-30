@@ -165,7 +165,6 @@ def process(path, apply_):
     # 函数体开头是 docstring 且紧跟多个空行的情况，压掉多余空行
     out = re.sub(r'("""\n)\n{2,}', r"\1", out)
 
-    ds_after = out.count('"""')  # 粗略
     return {"path": path, "lines_before": len(lines), "lines_after": out.count("\n") + 1,
             "comments": n_c, "comments_kept": n_c_keep,
             "comments_dropped": len(drop_full) + len(strip_tail),

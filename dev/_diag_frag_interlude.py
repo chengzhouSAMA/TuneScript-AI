@@ -142,7 +142,7 @@ def collisions(notes):
     for s, e, p, _v in notes:
         by.setdefault(p, []).append((s, e))
     n = 0
-    for p, segs in by.items():
+    for _p, segs in by.items():
         segs.sort()
         for i in range(1, len(segs)):
             if segs[i][0] < segs[i - 1][1] - 1e-6:

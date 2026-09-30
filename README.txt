@@ -35,3 +35,4 @@ V0.4 更新
 --------
 - *_piano.mid / *_五线谱.pdf / *_钢琴.wav
 - *_vocals/_drums/_bass/_guitar/_piano/_other.wav  分离音轨（6 轨）
+

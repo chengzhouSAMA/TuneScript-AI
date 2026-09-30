@@ -192,7 +192,7 @@ def main():
         rel = os.path.relpath(p, ROOT)
         if a.check:
             print('%s：%d 处' % (rel, len(hits)))
-            for ln, txt, rule in hits[:3]:
+            for ln, txt, _rule in hits[:3]:
                 print('    %d: %s' % (ln, txt[:90]))
             if len(hits) > 3:
                 print('    …还有 %d 处' % (len(hits) - 3))

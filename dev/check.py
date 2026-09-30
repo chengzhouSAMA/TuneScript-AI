@@ -30,6 +30,10 @@ REPO_DIR = os.path.join(ROOT, '_gh_repo')
 # name -> (stage, 说明, 命令, 预算秒)
 CHECKS = [
     ('syntax', 'fast', '所有 .py 过 ast.parse', None, 5),
+    ('ruff', 'fast', '静态检查（只挑真会出错的规则）',
+     [PY, '-m', 'ruff', 'check', '.', '回归验收/regress_one.py'], 20),
+    ('tree_sync', 'fast', '仓库里有、工作区没有的文件',
+     [PY, 'lang_dev/_check_tree_sync.py'], 15),
     ('persona', 'fast', '已发布文件无角色化称呼（含词表自检）',
      [PY, 'lang_dev/_strip_persona.py', '--check', '--selftest'], 10),
     ('unit', 'fast', '核心编排单元自检 89 项',
@@ -50,6 +54,8 @@ CHECKS = [
      [PY, 'lang_dev/_selfcheck.py'], 120),
     ('verify_exe', 'full', '出货 exe 的内容层 56 项',
      [PY, 'lang_dev/_verify_exe.py'], 300),
+    ('tree_sync_strict', 'full', '克隆不落后于工作区（出货前必查）',
+     [PY, 'lang_dev/_check_tree_sync.py', '--strict'], 30),
     ('smoke_exe', 'full', '出货 exe 冒烟（两臂）',
      [PY, 'lang_dev/_smoke_exe.py', '--arm', 'both'], 1800),
 ]
@@ -125,7 +131,7 @@ def main():
     print('自检模式 · %s 档 · %d 项（判据见 CONSTRAINTS.md）' % (a.stage, len(todo)))
     t_all = time.time()
     fails = []
-    for name, st, desc, cmd, budget in todo:
+    for name, _st, desc, cmd, budget in todo:
         t0 = time.time()
         ok, summary = run_one(name, cmd)
         el = time.time() - t0

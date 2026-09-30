@@ -29,6 +29,6 @@ mt3/
 # 网易云 cookie（本地自用，绝不入库）
 netease_cookie.txt
 
-# ��������ʱ���ɵġ����� cookie��ģ�飨���������ɾ��������⣩
+# 构建期临时生成的「烤入 cookie」模块（打包结束即删，绝不入库）
 netease_cookie_baked.py
 

@@ -394,7 +394,7 @@ def _merge_accomp_stems(stems, progress, out_dir=None):
                  f"电平对齐到最强轨 {target_name}（{20.0 * np.log10(max(gain, 1e-9)):+.2f} dB）。")
         return label, out
     except Exception as e:
-        progress(f"伴奏合并不可用({type(e).__name__})，回退最响单轨。")
+        progress(f"伴奏合并不可用({type(e).__name__}: {e})，回退最响单轨。")
         return _pick_main_accomp(stems)
 
 
@@ -705,7 +705,6 @@ def transcribe_mt3(wav_path, checkpoint, progress, model_path=None, max_sec=90.0
     返回 (midi_data, left, right, tempo)；失败抛异常，由调用方回退。
     """
     import librosa
-    from mt3_infer import load_model
 
     progress("加载 MT3 智能识别引擎(约 176MB 模型，稍候)…")
     model = _mt3_model(checkpoint)
@@ -1020,7 +1019,6 @@ def fuse_to_piano(melody_notes, accomp_notes, max_span=14, window=0.08):
     返回 (out, left, right)：out 是可直接写出的 MIDI，
     left/right 是左右手音符((start,end,pitch,velocity))，供大谱表 XML 用。
     """
-    from pretty_midi import PrettyMIDI
 
     melody_notes = _smooth_melody(melody_notes)
 
@@ -1849,7 +1847,6 @@ def _fill_right_hand(right, mix_notes, vline, split_pitch=60, min_len=0.06,
     纪律（与 t6 一致）：**不动左手、不动回炉取舍判据、不删改任何已有音**；只往右手加音。
     返回 (新的右手, 统计 dict)；异常由调用方捕获并回退。
     """
-    import bisect
     right = sorted(right, key=lambda n: (n[0], n[2]))
     out = list(right)
     st = {'added': 0, 'added_vocal': 0, 'added_instr': 0, 'skipped_win': 0,
@@ -2286,7 +2283,7 @@ def separate_stems(audio_path, out_dir, base, progress, shifts=1):
         progress("音轨分离完成。")
         return paths
     except Exception as e:
-        progress(f"音轨分离不可用({type(e).__name__})，改用整体分析。")
+        progress(f"音轨分离不可用({type(e).__name__}: {e})，改用整体分析。")
         return None
 
 
@@ -2461,7 +2458,7 @@ def _find_vocal_gaps(vocal_notes, other_notes, gap_thresh=2.2):
     gaps = []
     if vs[0][0] > gap_thresh:
         gaps.append((0.0, vs[0][0]))
-    for (s1, e1, _p1, _v1), (s2, e2, _p2, _v2) in zip(vs, vs[1:]):
+    for (s1, e1, _p1, _v1), (s2, _e2, _p2, _v2) in zip(vs, vs[1:]):
         if s2 - max(e1, s1) > gap_thresh:
             gaps.append((e1, s2))
     # 尾奏：最后一句人声之后到乐曲结束的空档
@@ -2513,7 +2510,6 @@ def _fill_melody_gaps(vocal_notes, other_notes, gap_thresh=2.2, gaps=None):
         bp = before[-1][2]
         ap = after[0][2]
         bridge = []
-        t = gs
         seg = 0.5
         n_steps = max(1, int(round((ge - gs) / seg)))
         for k in range(1, n_steps):
@@ -3173,11 +3169,11 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
         for d in (-2.0, 2.0):
             if tempo + d >= 40:
                 cands.append((f'{d:+.0f}BPM', float(tempo + d)))
-        best_bad, best_t, best_off = 1.0, float(tempo), 0.0
-        for name, c in cands:
-            bad, off = _beat_alignment_score(left, right, c)
+        best_bad, best_t = 1.0, float(tempo)
+        for _name, c in cands:
+            bad, _off = _beat_alignment_score(left, right, c)
             if bad < best_bad:
-                best_bad, best_t, best_off = bad, c, off
+                best_bad, best_t = bad, c
         if best_t != tempo and best_bad < 1.0:
             progress(f'节拍自检：{best_t:.0f} BPM 对齐更好(错位 {best_bad:.0%})，'
                      f'已从 {tempo:.0f} BPM 自动修正')
@@ -3204,7 +3200,7 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
     except RuntimeError as e:
         # PDF/MIDI 已经生成好了，不能整体失败 —— 但 WAV 是核心产物，必须报错说清
         raise RuntimeError(
-            f'{e}\n（五线谱 PDF 与 MIDI 已生成：{"; ".join(pdf_paths)}；{midi_path}）')
+            f'{e}\n（五线谱 PDF 与 MIDI 已生成：{"; ".join(pdf_paths)}；{midi_path}）') from e
 
     # ---- 旋律保真自检 + 回炉 ----
     _chk = _melody_similarity(decoded, out_wav)
@@ -3278,7 +3274,8 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                             progress('间奏补音：分轨伴奏 %d 个音并入右手候选池'
                                      '（原混音候选 %d 个）。' % (len(_an), len(_notes2) - len(_an)))
                     except Exception as _e6:
-                        progress('间奏补音不可用(%s)，保留原结果。' % type(_e6).__name__)
+                        progress('间奏补音不可用(%s: %s)，保留原结果。'
+                             % (type(_e6).__name__, _e6))
 
                 # ---- t6(2026-09-20)：出厂产物的人声连续性补救 ----
                 # 回炉结果 = 全曲混音按音高切手，低音区人声会被判给左手、人声不在最高音线
@@ -3337,7 +3334,7 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                         else:
                             progress('人声轨音符过少，本次不做人声接入。')
                 except Exception as _e3:
-                    progress(f'人声接入不可用({type(_e3).__name__})，保留回炉原结果。')
+                    progress(f'人声接入不可用({type(_e3).__name__}: {_e3})，保留回炉原结果。')
 
                 # ---- t11(2026-09-20)：右手补音「有人声处弹人声、无人声处弹伴奏」----
                 # 依据（新曲「月が綺麗ね」只读诊断，脚本 回归验收/_diag_feedback.py）：
@@ -3419,7 +3416,7 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                         else:
                             progress('右手补音：无需补（%s）' % _fst)
                     except Exception as _e4:
-                        progress(f'右手补音不可用({type(_e4).__name__})，保留原结果。')
+                        progress(f'右手补音不可用({type(_e4).__name__}: {_e4})，保留原结果。')
 
                 # ---- R2c：无人声段右手补音（t11 的判据会挡住这一类改动）----
                 # t11 的取舍用 `TS_FILL_WIN=0.008`。R2c 一开始也照抄了"用 DTW/chroma
@@ -3490,7 +3487,8 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                         else:
                             progress('间奏补右手：右手没有足够长的空档，跳过。')
                     except Exception as _e7:
-                        progress('间奏补右手不可用(%s)，保留原结果。' % type(_e7).__name__)
+                        progress('间奏补右手不可用(%s: %s)，保留原结果。'
+                             % (type(_e7).__name__, _e7))
             else:
                 # 回炉更差 —— 把产物改回原来的
                 _restore = _build_hands_midi(left, right)
@@ -3537,7 +3535,8 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                         _gst['raised'], _gst['raise_octaves'],
                         _gst['gap_before'], _gst['gap_after']))
     except Exception as _e5:
-        progress('音域分离不可用(%s)，保留原结果。' % type(_e5).__name__)
+        progress('音域分离不可用(%s: %s)，保留原结果。'
+                             % (type(_e5).__name__, _e5))
 
     results = {'midi': midi_path, 'pdf': pdf_paths, 'wav': out_wav}
     if stems:
@@ -3779,7 +3778,7 @@ class App:
                 from netease_login import quality_hint
                 msg = quality_hint()
             except Exception as e:
-                msg = '网易云登录状态未知（%s）' % type(e).__name__
+                msg = '网易云登录状态未知（%s: %s）' % (type(e).__name__, str(e)[:120])
             try:
                 self.root.after(0, lambda: self.netease_hint.set('可选：填歌名/歌手搜索下载。' + msg))
             except Exception:
@@ -3826,7 +3825,8 @@ class App:
             try:
                 code, cookie, msg = NL.poll_qr_key(unikey)
             except Exception as e:
-                st.set('轮询失败（%s），重试中…' % type(e).__name__)
+                st.set('轮询失败（%s: %s），重试中…'
+                           % (type(e).__name__, str(e)[:120]))
                 win.after(2500, lambda: poll(unikey))
                 return
             st.set(msg)
@@ -3851,7 +3851,8 @@ class App:
             try:
                 unikey, msg = NL.generate_qr_key()
             except Exception as e:
-                win.after(0, lambda: st.set('获取二维码失败：%s' % type(e).__name__))
+                _m = '获取二维码失败：%s: %s' % (type(e).__name__, str(e)[:120])
+                win.after(0, lambda _m=_m: st.set(_m))
                 return
             if not unikey:
                 win.after(0, lambda: st.set(msg))
