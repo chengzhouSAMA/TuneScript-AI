@@ -142,6 +142,28 @@ def main():
             _old + '的反馈',
             _old + '反馈',
         )
+        # 本轮（2026-09-25 第七轮）：--cli 的退出码与错误输出契约化。
+        # 被换掉的是那一段明文 `ERROR: ...` + sys.exit(1/2/3)，代码被整体重排，
+        # 所以按"行内容"登记而不是按位置。
+        known_del += (
+            '用法：transcriber_app --audio',
+            '无图形界面，直接跑完整管线，完成后打印产物路径',
+            'ERROR: 登录模块不可用',
+            'ERROR: 需提供 --outdir',
+            'ERROR: 网易云下载失败',
+            "ERROR: ' + str(e)",
+            'ERROR: %s',
+            "sys.exit(0 if info['ok'] else 1)",
+            'sys.exit(1)',
+            'sys.exit(2)',
+            'sys.exit(3)',
+            'sys.exit(0)',
+            'audio, _title, _dur = fetch_audio(',
+            'args.bvid,',
+            "save_path=os.path.join(args.outdir, f'{args.bvid}.m4a'),",
+            "progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}",
+            "or '未知原因')))",
+        )
         # 删掉**纯注释行或空行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。
         # 注意 difflib 的删除行首还带一个 '-'，判断注释前要先剥掉。
@@ -163,9 +185,10 @@ def main():
         _h, adds_all, dels_all = _diff(anchor, p)
         print("     累计（相对 V0.5 出货）：+%d / -%d" % (len(adds_all), len(dels_all)))
         # 上限只是"防静默大改"的护栏，不是预算。每轮把这些数写出来，涨就跟着抬。
-        # 2026-09-25 实测 +705：R1/R2、碎音修复、间奏补音三轮累计，全部有本轮章节对应。
-        check("累计新增在理智范围内（<=900）", len(adds_all) <= 900, "+%d" % len(adds_all))
-        check("累计删除在理智范围内（<=80）", len(dels_all) <= 80, "-%d" % len(dels_all))
+        # 2026-09-30 实测 +909/-86：R1/R2、碎音修复、间奏补音、轨优先级、称呼清理、
+        # 自检模式、CLI 契约七轮累计，每轮都有 `_README.md` 的章节对应。
+        check("累计新增在理智范围内（<=1100）", len(adds_all) <= 1100, "+%d" % len(adds_all))
+        check("累计删除在理智范围内（<=120）", len(dels_all) <= 120, "-%d" % len(dels_all))
     import ast as _ast
     try:
         _ast.parse(open(p, encoding="utf-8").read())

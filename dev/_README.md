@@ -2626,7 +2626,7 @@ python lang_dev/check.py --stage full    # 出货前（要 exe） （实测 111 
 | 档 | 内容 |
 |---|---|
 | fast | 语法（153 个 .py 过 `ast.parse`）、称呼口径、核心编排单元 89 项、GUI 接线 |
-| task | + 地板守卫、地板守卫阴性对照 19 项、新版 UI 54 项、推送闸门 18 项、归档与冻结基线 99 项 |
+| task | + 地板守卫、地板守卫阴性对照 21 项、新版 UI 54 项、推送闸门 18 项、CLI 契约 23 项、归档与冻结基线 99 项 |
 | full | + exe 内容层 52 项、exe 冒烟两臂 |
 
 **为什么分档**：`_selfcheck.py` 冷盘单跑要 **28.3 秒**（加载 LID 模型）。跑不完几秒的检查
@@ -2647,7 +2647,7 @@ F6 凭据进源码（**只报位置，绝不回显值**）。
 这就是 break-ai-fix-loops 那条"让验证者证明自己会失败"的价值：一个从没红过的检查
 没有任何证明力。推送闸门第一版是假闸门，也是靠同一招发现的。
 
-阴性对照现在 **19 项**：7 条规则各自的触发案例 + 删断言 + 阈值两个方向 + 例外表增删 +
+阴性对照现在 **21 项**：7 条规则各自的触发案例 + 删断言 + 阈值两个方向 + 例外表增删 +
 **干净对照**（干净改动必须 rc=0，确认它不会见谁都咬）。
 
 ### 规则书不能被自己的规则咬
@@ -2681,7 +2681,102 @@ F6 凭据进源码（**只报位置，绝不回显值**）。
 | `CONSTRAINTS.md` | **新增**：仓库根的质量标准（地板 + 带数字的约束 + RATCHET + 例外） |
 | `lang_dev/check.py` | **新增**：自检模式入口，三档预算 |
 | `lang_dev/_floor_guard.py` | **新增**：diff 级地板守卫 F1~F6 |
-| `lang_dev/_check_floorguard.py` | **新增**：守卫的 19 项阴性对照 |
+| `lang_dev/_check_floorguard.py` | **新增**：守卫的 21 项阴性对照 |
 | `lang_dev/_strip_persona.py` | 文案中性化（词表保留为数据），准备入库 |
 | `_vfy_diff.py` | 剥掉 UTF-8 BOM |
 | `lang_dev/_test_handgap_accomp.py` / `_selfcheck.py` / `_verify_exe.py` / `_check_pushguard.py` / `_check_newui.py` / `_check_gui.py` | 未改，被 `check.py` 纳入分档 |
+
+---
+
+# CLI 契约 + 平台陷阱（2026-09-25 第七轮）
+
+## 135. B：把 Windows/编码陷阱写进项目 skill
+
+这一轮先做了文档沉淀（要求里说的"B"）。写进 `tunescript-ai-piano-rules` skill 的
+「平台陷阱」一节，**条条都是本项目真踩过的**，不是抄来的通用清单：
+
+| 症状 | 真相 |
+|---|---|
+| 重定向日志里中文全是 `�` 且**不可还原** | PowerShell 用控制台代码页（cp936）解码 UTF-8，字节当场就丢 |
+| `Get-Content -Encoding UTF8` 读出乱码 + `ÿþ` | `Tee-Object`/`Out-File` 默认写 UTF-16 |
+| `.py` 报 `invalid non-printable character U+FEFF` | UTF-8 BOM（`ui_kit.py` 一次、`_vfy_diff.py` 一次，**两次**） |
+| `_selfcheck` 突然报 `+4160/-3411` | 文本模式读写把 CRLF 归一成 LF，整个文件行尾被换 |
+| `PermissionError: [WinError 32]` | 在 `with open(...)` 块**里面**删自己占着的文件 |
+| PyInstaller `WinError 5` / "构建成功但 sha 没变" | exe 正被运行中的实例占着 |
+
+外加两条防呆：**跑管线必须带 `--cli`**；**诊断时先看全量输出再过滤**
+（用 `Select-String` 过滤掉的正是 traceback，曾因此白等一整轮）。
+
+## 136. A：`--cli` 退出码与错误输出契约化
+
+依据 `ai-native-cli` 的 P0 规则（X3 用法错误必须退 2、X9 失败不许退 0、
+E4/E5 错误要有机器可读的 code + 人类可读的 message、E7 出错绝不进交互）落地。
+
+**改造前实测的三个真问题**：
+
+1. **`--help` 根本没被处理** —— 参数解析了，但没有任何地方读 `args.help`，
+   所以 `--cli --help` 会落到"缺 --outdir"然后**退 2**。
+2. **退出码 3 不在任何契约里** —— 网易云下载失败退 3，而 3 在规范里没有含义。
+3. **错误是明文 `ERROR: ...`** —— 机器读不出是哪一类错误，只能匹配中文。
+
+**现在的契约**（写进 `README.md` 公开，`--help` 里也印）：
+
+| 码 | 名字 | 含义 |
+|---|---|---|
+| 0 | success | 成功 |
+| 1 | failure | 运行期失败（管线/渲染/模型） |
+| 2 | usage | 参数或用法错误 |
+| 10 | auth | 认证失败（cookie 失效、扫码失败） |
+| 20 | not-found | 资源不存在（音频文件、搜不到、拿不到下载地址） |
+| 30 | conflict | 前置条件不满足（预留） |
+
+错误一律单行 JSON 到 **stderr**：
+
+```
+[cli] ERROR {"error":"error","code":"AUDIO_NOT_FOUND","message":"音频文件不存在：…","suggestion":"…"}
+```
+
+顺带加了：本地音频**先查存在性**（给出 `AUDIO_NOT_FOUND` 而不是让管线深处抛栈）；
+B 站取音频**单独 try/except**（`fetch_audio` 是抛异常不是返回 None —— 我第一版写成
+`if not audio` 是**死代码**，读源码时才发现）。
+
+## 137. 契约测试（23 项，真跑子进程）
+
+`lang_dev/_check_cli_contract.py` 不 mock，直接 `subprocess` 跑 `transcriber_app.py --cli`：
+
+- X1/X3：`--help`→0、无参数→2、未知参数→2、取值非法→2
+- X2/X4：音频不存在→**20** 且 code 是 `AUDIO_NOT_FOUND`
+- **C1/X9：三种失败场景下 stdout 必须为空**（失败不许退 0，也不许往 stdout 写东西）
+- E4/E5：错误 JSON 四个键齐全、message/suggestion 非空
+- E8：六个码的值与 `CLI_EXIT_TABLE` 一致（有人偷偷改值会被抓住）
+
+## 138. 顺手补的一个覆盖漏洞
+
+公开首页 `README.md` **只存在于 `_gh_repo/` 里**，工作区根本没有 —— 所以它从来没被
+`_strip_persona.py` 扫过（最显眼的文件反而没人管）。现在把工作区副本建起来了，
+并把 `README.md` / `CONSTRAINTS.md` 加进扫描列表。
+
+## 139. 出货 exe
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 547.8 MB |
+| sha256 | `F08D411D4F5F433C8783A8A71C6A66CB916F8B02CF15EB3BF8A2AAEF5C942B34`（上一版 `EE9FC845…`） |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `EE9FC845…`） |
+| 归档校验 | `_verify_exe.py` **56 项 0 问题**（内容层新增 `CLI_EXIT_TABLE` / `EXIT_USAGE` / `cli_error` / `AUDIO_NOT_FOUND`） |
+
+**这一轮必须重打 exe**：改的是出货入口 `--cli` 的行为（退出码变了），不是注释。
+
+## 140. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `transcriber_app.py` | 新增 `EXIT_*` / `CLI_EXIT_TABLE` 常量与 `cli_error()`；`--help` 真的可用；错误改单行 JSON；退出码按契约分级；本地音频先查存在性；B 站取音频单独 try/except |
+| `README.md` | **新增**「命令行接口（给自动化用的）」一节：退出码表 + 输出纪律；同时把工作区副本建起来 |
+| `lang_dev/_check_cli_contract.py` | **新增**：23 项契约测试（真跑子进程） |
+| `lang_dev/check.py` | task 档接入 `cli_contract` |
+| `lang_dev/_selfcheck.py` | 登记本轮 CLI 重写被替换掉的旧行；累计护栏 900/80 → 1100/120（写明实测 +909/-86） |
+| `lang_dev/_verify_exe.py` | 内容层新增 4 项 CLI 契约符号 |
+| `lang_dev/_strip_persona.py` | 扫描列表补上 `README.md` / `CONSTRAINTS.md` |
+| `CONSTRAINTS.md` | 约束表与 RATCHET 接入 CLI 契约 23 项 |

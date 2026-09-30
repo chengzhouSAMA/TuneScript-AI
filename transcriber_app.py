@@ -4008,11 +4008,41 @@ class App:
             pass
         self.root.after(120, self._poll)
 
+# ---------------------------------------------------------------------------
+# CLI 退出码与错误契约
+#
+# 依据 ai-native-cli 的 [P0]：X3 用法错误必须退 2、X9 失败不许退 0、
+# E4/E5 错误要有机器可读的 code + 人类可读的 message、E7 出错绝不进交互；
+# 以及 [P2] 的分级（1 一般 / 10 认证 / 20 找不到 / 30 前置条件）。
+#
+# ⚠️ **这是对外契约：只许新增，不许改名、不许改值**。
+# harness 只看退出码（_smoke_exe.py / regress_one.py / check.py），
+# 所以这张表是接口，不是注释。改之前先看 dev/_check_cli_contract.py。
+EXIT_OK = 0            # 成功
+EXIT_FAIL = 1          # 运行期一般失败（管线异常、渲染失败、找不到模型）
+EXIT_USAGE = 2         # 参数/用法错误（缺参数、未知参数、类型错、没给输入源）
+EXIT_AUTH = 10         # 认证失败（cookie 失效、扫码失败、登录模块不可用）
+EXIT_NOT_FOUND = 20    # 资源不存在（音频文件、网易云搜不到、拿不到下载地址）
+EXIT_CONFLICT = 30     # 前置条件不满足（输出目录不可写、只拿到试听片段）
+
+CLI_EXIT_TABLE = (
+    (EXIT_OK, 'success', '成功'),
+    (EXIT_FAIL, 'failure', '运行期失败（管线/渲染/模型）'),
+    (EXIT_USAGE, 'usage', '参数或用法错误'),
+    (EXIT_AUTH, 'auth', '认证失败'),
+    (EXIT_NOT_FOUND, 'not-found', '资源不存在'),
+    (EXIT_CONFLICT, 'conflict', '前置条件不满足'),
+)
+
 def cli_main():
     """隐藏的命令行模式，便于自动化/打包自检。
 
-    用法：transcriber_app --audio <音频> --outdir <输出目录>
-    无图形界面，直接跑完整管线，完成后打印产物路径(JSON)并退出。
+    用法：transcriber_app --cli --audio <音频> --outdir <输出目录>
+    无图形界面，直接跑完整管线，完成后把产物路径(JSON)打到 stdout 并退出。
+
+    输出纪律：**stdout 只放数据**（成功时是产物 JSON，--netease-check 时是账号信息
+    JSON），**日志/进度/错误全走 stderr**。错误是单行 JSON：
+    `[cli] ERROR {"error":…,"code":…,"message":…,"suggestion":…}`。
     """
     def _stream_ok(stream):
         try:
@@ -4037,6 +4067,28 @@ def cli_main():
     def progress(msg):
         _safe_write(sys.stderr, '[cli] ' + msg + '\n')
 
+    def cli_error(code, message, suggestion='', exit_code=EXIT_FAIL):
+        """报错即退出。错误是**单行 JSON**（机器可读 code + 人类可读 message）。
+
+        两条纪律：绝不在出错时进交互（直接退），绝不把错误写进 stdout 还退 0
+        —— harness 只看退出码，退 0 就等于骗过了所有自检。
+        """
+        payload = {'error': 'error', 'code': code, 'message': message,
+                   'suggestion': suggestion}
+        _safe_write(sys.stderr,
+                    '[cli] ERROR ' + json.dumps(payload, ensure_ascii=False) + '\n')
+        sys.exit(exit_code)
+
+    def cli_help():
+        """帮助是"用户要的数据"，走 stdout（日志才走 stderr）。"""
+        lines = [ap.format_help().rstrip(), '',
+                 '退出码（对外契约，只增不改）：']
+        for code, name, desc in CLI_EXIT_TABLE:
+            lines.append('  %-3d %-10s %s' % (code, name, desc))
+        lines += ['', '输出纪律：stdout 只放数据（产物 JSON），日志与错误走 stderr。',
+                  '错误格式： [cli] ERROR {"error","code","message","suggestion"}']
+        return '\n'.join(lines) + '\n'
+
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument('--audio')
     ap.add_argument('--bvid', help='B站视频 BV 号：自动下载音频后转谱(无需 Cookie)')
@@ -4060,40 +4112,58 @@ def cli_main():
     argv = [a for a in sys.argv[1:] if a != '--cli']
     args = ap.parse_args(argv)
 
+    # --help 必须真的有用（以前它被解析了却没人处理，直接落到"缺 --outdir"退 2）
+    if args.help:
+        _safe_write(sys.stdout, cli_help())
+        sys.exit(EXIT_OK)
+
     # 网易云的登录/状态子命令：不需要 --outdir，先短路处理
     if args.netease_check or args.netease_login:
         try:
             import netease_login as NL
         except Exception as e:
-            _safe_write(sys.stderr, 'ERROR: 登录模块不可用：%s\n' % e)
-            sys.exit(1)
+            cli_error('LOGIN_MODULE_UNAVAILABLE', '登录模块不可用：%s' % e,
+                      '确认 netease_login.py 随包发布（打包缺文件时会这样）',
+                      EXIT_AUTH)
         if args.netease_check:
             info = NL.account_info()
             _safe_write(sys.stdout, json.dumps(info, ensure_ascii=False) + '\n')
             _safe_write(sys.stderr, '[cli] cookie 来源：%s\n'
                         % (NL.cookie_source() or '无'))
             _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
-            sys.exit(0 if info['ok'] else 1)
+            # 没登录是**认证失败**，不是一般错误 —— cookie 失效也给这个码
+            sys.exit(EXIT_OK if info['ok'] else EXIT_AUTH)
         _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
         _cookie, _msg = NL.login(progress=lambda m: _safe_write(sys.stderr, '[cli] %s\n' % m))
         if not _cookie:
-            _safe_write(sys.stderr, 'ERROR: %s\n' % _msg)
-            sys.exit(1)
+            cli_error('LOGIN_FAILED', _msg or '扫码登录未成功',
+                      '重试扫码，或用 GUI「网易云」页的 cookie 输入栏粘贴 MUSIC_U',
+                      EXIT_AUTH)
         _safe_write(sys.stderr, '[cli] %s\n' % NL.quality_hint())
-        sys.exit(0)
+        sys.exit(EXIT_OK)
 
     if not args.outdir:
-        _safe_write(sys.stderr, 'ERROR: 需提供 --outdir\n')
-        sys.exit(2)
+        cli_error('MISSING_OUTDIR', '需提供 --outdir',
+                  '例：--cli --audio 歌曲.flac --outdir ./输出', EXIT_USAGE)
     try:
         audio = args.audio
+        # 本地文件先查存在性：早点给出 AUDIO_NOT_FOUND，比让管线深处抛栈清楚得多
+        if audio and not os.path.isfile(audio):
+            cli_error('AUDIO_NOT_FOUND', '音频文件不存在：%s' % audio,
+                      '检查路径；含空格/日文时记得整体加引号', EXIT_NOT_FOUND)
         if not audio and args.bvid:
             from bilibili import fetch_audio
             _safe_write(sys.stderr, '[cli] 正在按 BV 号获取 B站音频…\n')
-            audio, _title, _dur = fetch_audio(
-                args.bvid,
-                save_path=os.path.join(args.outdir, f'{args.bvid}.m4a'),
-                progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}\n'))
+            try:
+                audio, _title, _dur = fetch_audio(
+                    args.bvid,
+                    save_path=os.path.join(args.outdir, f'{args.bvid}.m4a'),
+                    progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}\n'))
+            except Exception as e:
+                # fetch_audio 是**抛异常**而不是返回 None（别写成 if not audio 那种死代码）
+                cli_error('BILIBILI_FETCH_FAILED', '按 BV 号取音频失败：%s' % e,
+                          '确认 BV 号正确、视频未下架；网络异常也会走这里',
+                          EXIT_NOT_FOUND)
         if not audio and (args.netease or args.netease_id):
             from netease import fetch_song
             _safe_write(sys.stderr, '[cli] 正在从网易云获取音频…\n')
@@ -4102,26 +4172,30 @@ def cli_main():
                 level=args.quality,
                 progress=lambda m: _safe_write(sys.stderr, f'[cli] {m}\n'))
             if not audio:
-                _safe_write(sys.stderr, 'ERROR: 网易云下载失败：%s\n'
-                            % ((_ninfo.get('reason') or '未知原因')))
-                sys.exit(3)
+                cli_error('NETEASE_FETCH_FAILED',
+                          '网易云下载失败：%s' % (_ninfo.get('reason') or '未知原因'),
+                          '换歌名/歌手，或降音质；只有试听片段的歌需要 '
+                          'TS_NETEASE_ALLOW_TRIAL=1', EXIT_NOT_FOUND)
         if not audio:
-            _safe_write(sys.stderr, 'ERROR: 需提供 --audio 或 --bvid 或 --netease/--netease-id\n')
-            sys.exit(2)
+            cli_error('MISSING_INPUT', '需提供 --audio 或 --bvid 或 --netease/--netease-id',
+                      '例：--cli --audio 歌曲.flac --outdir ./输出', EXIT_USAGE)
         results = run_pipeline(audio, args.outdir, find_model(), find_musescore(),
                                find_ffmpeg(), progress,
                                use_separation=not args.no_sep,
                                simple_mode=args.simple, use_mt3=args.mt3)
+    except SystemExit:
+        raise                      # cli_error 已经在上面退过了，别重复包装
     except Exception as e:
-        _safe_write(sys.stderr, 'ERROR: ' + str(e) + '\n')
         if getattr(sys, 'frozen', False):
             try:
                 traceback.print_exc(file=sys.stderr)
             except Exception:
                 pass
-        sys.exit(1)
+        cli_error('PIPELINE_FAILED', '%s: %s' % (type(e).__name__, e),
+                  '看上面的 [cli] 日志定位；产物可能已部分生成（PDF/MIDI 先落地）',
+                  EXIT_FAIL)
     _safe_write(sys.stdout, json.dumps(results, ensure_ascii=False) + '\n')
-    sys.exit(0)
+    sys.exit(EXIT_OK)
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":

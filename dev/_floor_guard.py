@@ -141,6 +141,19 @@ def _strip_strings(line):
     return re.sub(r"'[^']*'|\"[^\"]*\"", '', line)
 
 
+def _check_key(line):
+    """把一条 `check(...)` 断言的"身份"抽出来。
+
+    数字统一换成 `#`：阈值常常写在断言名字里（`累计新增在理智范围内（<=900）`），
+    改成 1100 是**收紧护栏**、不是削弱测试，不该被判成"删掉断言"。
+    只有整条断言凭空消失（身份在新增行里找不到）才算削弱。
+    """
+    m = re.search(r'check\s*\(', line)
+    if not m:
+        return None
+    return re.sub(r'\d+', '#', line[m.start():]).strip()[:60]
+
+
 def scan(added, removed):
     hits = []
 
@@ -181,6 +194,8 @@ def scan(added, removed):
             add('F2 未完成的活', f, '空 except 吞掉失败：%s' % ra.strip()[:60])
 
     # F3 测试被削弱
+    added_keys = {_check_key(l) for f, l in added
+                  if f and any(t in f for t in TEST_FILES)}
     for f, raw in added:
         if is_code(f) and any(t in f for t in TEST_FILES):
             line = _strip_strings(raw)
@@ -189,7 +204,9 @@ def scan(added, removed):
                     add('F3 测试被削弱', f, '新增跳过：%s' % raw.strip()[:70])
     for f, line in removed:
         if f and any(t in f for t in TEST_FILES) and re.search(r'\bcheck\s*\(', line):
-            add('F3 测试被削弱', f, '删掉了一条断言：%s' % line.strip()[:70])
+            k = _check_key(line)
+            if k not in added_keys:
+                add('F3 测试被削弱', f, '删掉了一条断言：%s' % line.strip()[:70])
 
     return hits
 

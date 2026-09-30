@@ -27,6 +27,8 @@ PUBLISHED = [
     'bilibili.py', 'lang_id.py', 'lang_id_qwen_runner.py', 'audio_crop.py',
     'lang_modes.py', 'lang_pipeline.py', 'ja_romaji.py', 'en_phoneme.py',
     'asr_refine.py', 'lyrics_fetch.py', 'lyrics_match.py', 'make_icon.py',
+    # 公开首页 —— 最显眼的文件，以前没人扫过它
+    'README.md', 'CONSTRAINTS.md',
 ]
 DEV_DIR = 'lang_dev'
 # 词表（数据，不是文案）：出现即报，不自动改，要人工判断。前两项是"助手口吻"的

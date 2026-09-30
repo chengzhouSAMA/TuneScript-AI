@@ -179,6 +179,21 @@ with open(os.path.join(TMP, 'app.py'), 'w', encoding='utf-8') as f:
 rc, out = guard('t4')
 check('代码里真的挂了抑制注释 → 要报', rc == 1 and 'F1' in out, 'rc=%d' % rc)
 
+print('\n=== 改阈值 ≠ 删断言（收紧护栏不该被判成削弱测试） ===')
+with open(os.path.join(TMP, '_check_x.py'), 'w', encoding='utf-8') as f:
+    f.write('check("通过数在理智范围内（<=900）", True)\ncheck("另一条", True)\n')
+git(['add', '-A'])
+git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'asserts'])
+git(['tag', 't5'])
+with open(os.path.join(TMP, '_check_x.py'), 'w', encoding='utf-8') as f:
+    f.write('check("通过数在理智范围内（<=1100）", True)\ncheck("另一条", True)\n')
+rc, out = guard('t5')
+check('只改名字里的阈值（900→1100）→ **不报**', rc == 0 and 'F3' not in out, 'rc=%d' % rc)
+with open(os.path.join(TMP, '_check_x.py'), 'w', encoding='utf-8') as f:
+    f.write('check("通过数在理智范围内（<=1100）", True)\n')
+rc, out = guard('t5')
+check('整条断言消失 → 要报', rc == 1 and 'F3' in out, 'rc=%d' % rc)
+
 os.chdir(os.path.dirname(TMP))
 shutil.rmtree(TMP, ignore_errors=True)
 

@@ -28,7 +28,7 @@ python lang_dev/check.py --stage full    # 出货前（要 exe） （分钟级�
 
 上面这些由 `lang_dev/_floor_guard.py` 按 **diff** 检查（含未跟踪的新文件），
 它自己的有效性由 `lang_dev/_check_floorguard.py` 的**阴性对照**证明
-（19 项：每一条作弊都要能把它弄红，干净改动必须不能，规则书本身不能被咬）。
+（21 项：每一条作弊都要能把它弄红，干净改动必须不能，规则书本身不能被咬）。
 
 ---
 
@@ -41,11 +41,12 @@ python lang_dev/check.py --stage full    # 出货前（要 exe） （分钟级�
 | 语法 | 所有 `.py` 过 `ast.parse` | `python lang_dev/check.py --stage fast` | 每次编辑 |
 | 单元自检 | 89/89 | `python lang_dev/_test_handgap_accomp.py` | 每次编辑 |
 | GUI 接线 | 0 问题 | `python lang_dev/_check_gui.py` | 每次编辑 |
-| 地板守卫自身 | 19/19 | `python lang_dev/_check_floorguard.py` | 任务结束 |
+| 地板守卫自身 | 21/21 | `python lang_dev/_check_floorguard.py` | 任务结束 |
 | 新版 UI | 54/54 | `python lang_dev/_check_newui.py` | 任务结束 |
 | 推送闸门 | 18/18 | `python lang_dev/_check_pushguard.py` | 任务结束 |
+| CLI 契约 | 23/23，退出码只增不改 | `python lang_dev/_check_cli_contract.py` | 任务结束 |
 | 归档与冻结基线 | 99/99，且 `_stems/` 无新写入 | `python lang_dev/_selfcheck.py` | 任务结束 |
-| exe 内容层 | 0 问题 | `python lang_dev/_verify_exe.py` | 出货 |
+| exe 内容层 | 56 项 0 问题 | `python lang_dev/_verify_exe.py` | 出货 |
 | exe 冒烟 | OFF 11/11、ON 12/12 | `python lang_dev/_smoke_exe.py --arm both` | 出货 |
 | 备份纪律 | 每轮一份源码快照 | 人看 | 改源码时 |
 | exe 打包 | 每版都出 exe（注释/文档轮可免，须写明理由） | 人看 | 出货 |
@@ -65,8 +66,9 @@ python lang_dev/check.py --stage full    # 出货前（要 exe） （分钟级�
 |---|---|---|
 | 单元自检通过数 | 89 | w |
 | 归档自检通过数 | 99 | w |
-| 地板守卫阴性对照 | 19 | w |
+| 地板守卫阴性对照 | 21 | w |
 | 推送闸门自检 | 18 | w |
+| CLI 契约自检 | 23 | w |
 | 全曲 sim fanwut | 0.8961 | w |
 | 全曲 sim shiki | 0.8884 | w |
 | 全曲 sim jiabin | 0.9410 | w |

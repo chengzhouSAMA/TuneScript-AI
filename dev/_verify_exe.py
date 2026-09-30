@@ -163,6 +163,10 @@ def main():
                  ("ACCOMP_PRIORITY", "轨优先级表（鼓不识别、贝斯最后）"),
                  ("_accomp_weights", "按优先级算合并权重"),
                  ("ACCOMP_LAST_W", "最低优先档的权重（贝斯默认 0.40）"),
+                 ("CLI_EXIT_TABLE", "CLI 退出码契约表"),
+                 ("EXIT_USAGE", "用法错误退 2"),
+                 ("cli_error", "结构化错误输出（单行 JSON）"),
+                 ("AUDIO_NOT_FOUND", "找不到音频的错误码"),
                  ("ui_app", "新版多入口 UI（惰性 import，必须在包里）"))
     n_content = 0   # 下面几组内容层检查的总项数，最后汇总用
     # 新版 UI 里的关键件必须真的编译进了 ui_app（模块在 ≠ 内容是新的）
