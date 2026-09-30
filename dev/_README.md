@@ -2597,3 +2597,91 @@ python lang_dev/_strip_persona.py            # 就地清
 
 它扫的是"会上传到 GitHub 的那批文件"（根目录模块 + `dev/`），
 会连带报出别的助手口吻标记。**提交前跑一次 `--check` 就能拦住复发。**
+
+---
+
+# 自检模式（2026-09-25 第六轮）
+
+要求：**挑选 aas 技能，开始加入自检模式。**
+
+## 129. 从 aas 目录里选了四个（2459 个里筛的）
+
+来源 `github.com/sickn33/agentic-awesome-skills`，装进 `~/.dsh/skills`：
+
+| 技能 | 拿它做什么 |
+|---|---|
+| `constraint-driven-development` | **骨架**：把质量标准写成带数字、带命令、带"何时跑"的 `CONSTRAINTS.md`，并分 fast/task/full 三档 |
+| `break-ai-fix-loops` | 修 bug 的纪律：失败指纹、**三次尝试预算**、真实路径证明、**阴性对照**、可验证回滚 |
+| `poka-yoke` | 设计原则：让错的事**自己喊出来**，而不是写进文档靠自觉 |
+| `code-review-checklist` | 每轮 REVIEW 阶段的固定检查表 |
+
+## 130. 一个入口，三档预算
+
+```
+python lang_dev/check.py --stage fast    # 每次编辑后      （实测 0.9 秒，4 项）
+python lang_dev/check.py --stage task    # 认为做完了      （实测 14 秒，9 项）
+python lang_dev/check.py --stage full    # 出货前（要 exe） （实测 111 秒，11 项）
+```
+
+| 档 | 内容 |
+|---|---|
+| fast | 语法（153 个 .py 过 `ast.parse`）、称呼口径、核心编排单元 89 项、GUI 接线 |
+| task | + 地板守卫、地板守卫阴性对照 19 项、新版 UI 54 项、推送闸门 18 项、归档与冻结基线 99 项 |
+| full | + exe 内容层 52 项、exe 冒烟两臂 |
+
+**为什么分档**：`_selfcheck.py` 冷盘单跑要 **28.3 秒**（加载 LID 模型）。跑不完几秒的检查
+塞进编辑循环，最后一定被人关掉 —— **被关掉的闸门比没有闸门更糟**，因为标准看起来还在。
+
+## 131. 地板守卫：拦"为了让检查变绿而降低标准"
+
+`lang_dev/_floor_guard.py` **只查 diff**（含未跟踪的新文件），六条：F1 新增抑制注释 /
+F2 未完成的活与空 except / F3 测试被削弱 / F4 阈值被下调 / F5 悄悄开了例外 /
+F6 凭据进源码（**只报位置，绝不回显值**）。
+
+### ⚠️ 它第一条抓出来的 bug 是它自己的
+
+写完先写阴性对照（`lang_dev/_check_floorguard.py`），逐条把作弊写进临时仓库看它红不红。
+结果抓到：**`git diff` 看不见未跟踪的新文件** —— 新建一个文件把密钥或 `# noqa`
+写进去，守卫一声不吭。已修（补扫 `git ls-files --others`）。
+
+这就是 break-ai-fix-loops 那条"让验证者证明自己会失败"的价值：一个从没红过的检查
+没有任何证明力。推送闸门第一版是假闸门，也是靠同一招发现的。
+
+阴性对照现在 **19 项**：7 条规则各自的触发案例 + 删断言 + 阈值两个方向 + 例外表增删 +
+**干净对照**（干净改动必须 rc=0，确认它不会见谁都咬）。
+
+### 规则书不能被自己的规则咬
+
+`CONSTRAINTS.md` 里写着"不许加 `# noqa`"，这句话本身就含 `# noqa` —— 第一版守卫
+把规则书自己报了 8 条。已改成：**模式扫描跳过 `CONSTRAINTS.md`**（它必须能写出这些
+模式），但 F4/F5 照样管它。
+
+## 132. `CONSTRAINTS.md`（仓库根）
+
+- **地板**：7 条永远生效、不需要装工具的规矩。
+- **带数字的约束**：每条都写明「谁检查」的命令与「什么时候跑」。
+  （依据 constraint-driven-development：**有数字没命令的那一行不算约束，是愿望**。）
+- **RATCHET**：记下今天的数（sim / 碎片率 / 最长空档 / 各项通过数），**只许更好**。
+  方向 `w` 越大越好、`s` 越小越好，守卫按方向判定"变差"。
+- **例外表**：带到期时间；新增行会被 F5 报出来。
+- **不适用**：桌面应用没有 URL，**Lighthouse/axe/覆盖率门槛/依赖扫描不适用** ——
+  不为了凑数发明跑不起来的检查。
+- 两条纪律：**成本决定位置**；**至少留一条外部意见**（本项目里"外部" = 原曲音频本身）。
+
+## 133. 顺带修掉的真问题
+
+新加的语法检查当场报出 `_vfy_diff.py:1 invalid non-printable character U+FEFF` ——
+工作区根上一个 2026-09-19 留下的一次性脚本带 UTF-8 BOM。已用**字节级写入**剥掉
+（321→318 B，行尾 CRLF 原样保留）。项目以前被 BOM 坑过一次，这次是它自己冒出来的。
+
+## 134. 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `CONSTRAINTS.md` | **新增**：仓库根的质量标准（地板 + 带数字的约束 + RATCHET + 例外） |
+| `lang_dev/check.py` | **新增**：自检模式入口，三档预算 |
+| `lang_dev/_floor_guard.py` | **新增**：diff 级地板守卫 F1~F6 |
+| `lang_dev/_check_floorguard.py` | **新增**：守卫的 19 项阴性对照 |
+| `lang_dev/_strip_persona.py` | 文案中性化（词表保留为数据），准备入库 |
+| `_vfy_diff.py` | 剥掉 UTF-8 BOM |
+| `lang_dev/_test_handgap_accomp.py` / `_selfcheck.py` / `_verify_exe.py` / `_check_pushguard.py` / `_check_newui.py` / `_check_gui.py` | 未改，被 `check.py` 纳入分档 |
