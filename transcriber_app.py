@@ -1416,6 +1416,9 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
     right = _fix_same_pitch_overlap(_dedupe_exact(right))
     left = _separate_hands(left, right_min=60)  # 左右手音域分离
     left, right, _gapst = _enforce_octave_gap(left, right)   # R1：拉到整整一个八度
+    # 左手去自我八度加倍：本音与"本音高八度"被同时留下的，只留本音。
+    # 放在 R1 之后，确保处理的是最终音高，且只会加大两手间距、不会缩小。
+    left = _collapse_octave_doubling(left)
     left = _soft_velocity(left, lo=40, hi=100)
     right = _soft_velocity(right, lo=50, hi=110)
     return _build_hands_midi(left, right), left, right
@@ -1424,6 +1427,47 @@ def _simple_piano(notes, split_pitch=60, max_span=14, max_notes=4, window=0.08):
 def _drop_tiny(notes, min_len=0.08):
     """过滤超短碎音(基本是识别噪声，听感是‘杂音’)。"""
     return [(s, e, p, v) for s, e, p, v in notes if e - s >= min_len]
+
+
+def _collapse_octave_doubling(hand, window=0.08):
+    """去掉同一只手里「本音 + 高一个八度」的自我加倍，只留一条线。
+
+    为什么需要（2026-09-30，琵琶曲取证）：
+      · 出厂路径 `_simple_piano` 的左手是 `fix_hand(max_notes=4, mode="mix")`，
+        而 `max_span=14` 刚好容得下一个八度(12) —— 识别把一个贝斯音同时写成
+        "本音 + 高八度"时，两个音都被保留；
+      · 实测琵琶曲产物左手 594 音里有 **119 个(20.0%)** 就是这种自我加倍，
+        右手另有 50 个(9.3%)；配上左右手起音错位中位 23ms，谱面上就是
+        同一条线被写成两条互相错开的声部 = 「左右手抢节奏」；
+      · 本函数只作用于**左手**：右手不动。改右手（`mode="melody"`）已于
+        2026-09-20 实测否定并回退，证据见 `_simple_piano` 里的 t3-A 记录。
+
+    保留本窗最低音，删掉与它相差整数个八度的音。窗口口径与 `fix_hand` 一致
+    （以每个音起音为锚，**只向后看 80ms**）。刻意不做"向后看"：低音与高八度
+    相隔 >80ms 的交替（如 G1→G2 的舞曲贝斯）是真实演奏型态，不是识别加倍。
+    只删不改音高，所以不影响 R1 已经保证的「左右手相差一个八度」。
+    """
+    if not hand:
+        return hand
+    hand = sorted(hand, key=lambda n: (n[0], n[2]))
+    n = len(hand)
+    drop = [False] * n
+    i = 0
+    while i < n:
+        t0 = hand[i][0]
+        j, win = i, []
+        while j < n and hand[j][0] <= t0 + window:
+            if hand[j][1] >= t0:
+                win.append(j)
+            j += 1
+        i = j
+        if len(win) > 1:
+            low = min(hand[k][2] for k in win)
+            for k in win:
+                p = hand[k][2]
+                if p > low and (p - low) % 12 == 0:
+                    drop[k] = True
+    return [hand[k] for k in range(n) if not drop[k]]
 
 
 def _separate_hands(left, right_min=60):

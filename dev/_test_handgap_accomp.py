@@ -394,6 +394,82 @@ check('LAST_W=0 时直接返回那条轨的原始文件', os.path.abspath(_out0)
 
 T.ACCOMP_PRIORITY, T.ACCOMP_LAST_W = _keep_prio, _keep_w
 
+print('\n=== 15) _collapse_octave_doubling：左手去"本音+高八度"自我加倍 ===')
+
+
+def _pitches(hand):
+    return [n[2] for n in hand]
+
+
+# 2026-09-30 琵琶曲取证：出厂路径 _simple_piano 的左手是
+# fix_hand(max_notes=4, mode="mix")，而 max_span=14 刚好容得下一个八度，
+# 于是"贝斯本音 + 它的高八度"两个音都被保留（实测 119 个 = 左手 20.0%），
+# 谱面上表现为同一条线被写成两条互相错开的声部 = 「左右手抢节奏」。
+check('空输入返回空', T._collapse_octave_doubling([]) == [])
+_one = [(0.0, 0.5, 48, 80)]
+check('单音原样返回', T._collapse_octave_doubling(_one) == _one)
+
+_both = [(0.0, 0.5, 48, 80), (0.0, 0.5, 60, 70)]
+_out = T._collapse_octave_doubling(_both)
+check('本音+高八度同窗 → 只留本音', _pitches(_out) == [48], 'p=%s' % _pitches(_out))
+check('保留的是那个音的时间戳', _out[0][0] == 0.0 and _out[0][1] == 0.5)
+check('力度原样不动（只删音，不改属性）', _out[0][3] == 80)
+check('差 24 半音同样删',
+      _pitches(T._collapse_octave_doubling([(0.0, .5, 36, 80), (0.0, .5, 60, 60)])) == [36])
+check('错开 10ms 仍算同窗 → 删',
+      _pitches(T._collapse_octave_doubling([(0.0, .5, 48, 80), (0.010, .5, 60, 70)])) == [48])
+
+# 负控：该保留的一个都不能动
+_chord = [(0.0, 0.5, 48, 80), (0.0, 0.5, 52, 78), (0.0, 0.5, 55, 76)]
+check('C3+E3+G3 三和弦原样保留',
+      _pitches(T._collapse_octave_doubling(_chord)) == [48, 52, 55],
+      'p=%s' % _pitches(T._collapse_octave_doubling(_chord)))
+check('C3+B3(差 11) 保留',
+      len(T._collapse_octave_doubling([(0.0, .5, 48, 80), (0.0, .5, 59, 70)])) == 2)
+check('相隔 200ms 的八度不动（不是同窗）',
+      _pitches(T._collapse_octave_doubling([(0.0, .5, 48, 80), (0.20, .5, 60, 70)])) == [48, 60])
+check('同音高重复不在本函数职责内（原样返回）',
+      len(T._collapse_octave_doubling([(0.0, .5, 48, 80), (0.010, .5, 48, 70)])) == 2)
+
+# 窗口口径与 fix_hand 一致：以每个音起音为锚，只向后看 80ms
+_sus = [(0.0, 2.0, 48, 80), (0.050, 1.5, 60, 70)]
+check('长音铺底、八度音在 80ms 内起音 → 删',
+      _pitches(T._collapse_octave_doubling(_sus)) == [48],
+      'p=%s' % _pitches(T._collapse_octave_doubling(_sus)))
+check('前音已结束时不算同窗',
+      _pitches(T._collapse_octave_doubling([(0.0, .3, 48, 80), (1.0, 1.5, 60, 70)])) == [48, 60])
+# ⚠️ 刻意不做"向后看"：低音与高八度相隔 >80ms 的交替（如 G1→G2 的舞曲贝斯）
+#    是真实演奏型态，不是识别加倍，删了就是把音乐改坏。
+_alt = [(0.0, 0.30, 31, 80), (0.093, 0.30, 43, 80)]
+check('相隔 93ms 的根音/八度交替原样保留（真实贝斯型态）',
+      _pitches(T._collapse_octave_doubling(_alt)) == [31, 43],
+      'p=%s' % _pitches(T._collapse_octave_doubling(_alt)))
+
+_many = [
+    (0.0, 0.4, 36, 80), (0.0, 0.4, 48, 70), (0.0, 0.4, 60, 60),   # 三个八度叠一起
+    (0.5, 0.9, 41, 80), (0.5, 0.9, 43, 75),                        # F2+G2，非八度 → 都留
+    (1.0, 1.4, 43, 80), (1.0, 1.4, 55, 70),                        # G2+G3，差 12 → 删上
+]
+_pm = _pitches(T._collapse_octave_doubling(_many))
+check('三个八度叠加只留最低的 36', 36 in _pm and 48 not in _pm and 60 not in _pm, 'p=%s' % _pm)
+check('F2+G2 这种非八度和声保留', 41 in _pm and 43 in _pm)
+check('G2+G3 删掉 55', 43 in _pm and 55 not in _pm, 'p=%s' % _pm)
+check('音符总数 = 7 − 3', len(_pm) == 4, 'n=%d' % len(_pm))
+
+# 接入点：真的走 _simple_piano，确认左手少了音、右手一个不变
+_notes = []
+for _k in range(10):
+    _t = _k * 0.25
+    _notes.append((_t, _t + 0.2, 43, 80))        # 贝斯本音 G2
+    _notes.append((_t, _t + 0.2, 55, 70))        # 它的高八度 G3
+    _notes.append((_t, _t + 0.2, 74, 90))        # 右手旋律 D5
+_midi, _lu, _ru = T._simple_piano(_notes)
+check('接入后左手已无 ≥60 的音', all(p < 60 for _, _, p, _ in _lu))
+check('接入后左手不再是"本音+高八度"两条线',
+      len({round(s, 2) for s, _, _, _ in _lu}) == len(_lu), 'L=%d 音' % len(_lu))
+check('右手音符数不受影响', len(_ru) == 10, 'R=%d 音' % len(_ru))
+check('右手音高不动', {p for _, _, p, _ in _ru} == {74})
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:

@@ -157,6 +157,7 @@ def main():
                  ("_build_accomp", "R2 无人声段伴奏整理"),
                  ("_accomp_legacy", "R2 回退路径（TS_ACCOMP_BOOST=0）"),
                  ("_fill_hand_gaps", "间奏补音：分轨素材填进某只手的空档"),
+                 ("_collapse_octave_doubling", "左手去「本音+高八度」自我加倍"),
                  ("_gap_notes", "间奏补音的素材来源（other 轨单独识别）"),
                  ("TS_GAP_FILL_WIN", "间奏补右手的代理判定容差（默认 0 = 不判）"),
                  ("_rpass", "间奏补右手的取舍分支"),

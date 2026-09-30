@@ -2935,3 +2935,110 @@ kana = text_to_kana(text)     # 死代码：循环里每个字符都重新算一
 | `lang_dev/check.py` | fast 档接入 `ruff` 与 `tree_sync`，full 档加 `tree_sync_strict`（fast 6 / task 12 / full 15） |
 | `.gitignore` / `README.txt` / `requirements.txt` | **新增到工作区**（以前只在克隆里） |
 | `lang_dev/_selfcheck.py` / `_strip_persona.py` / `_floor_guard.py` / `_check_gui.py` / `_measure_handgap.py` / `_trim_comments.py` / `_test_en_align.py` / `_diag_frag_interlude.py` / `_probe_lyrics_api.py` / `_setup_sidecar.py` | ruff 清理（未用 import / 未用局部 / 解包变量） |
+
+## 147. 左右手抢节奏：出厂路径的左手在给自己加八度
+
+用户报「识别时左右手抢节奏」，例子是琵琶曲。
+
+⚠️ **源音频不在手上**：桌面的 `转谱测试_月が綺麗ねと言われたい_20260920/` 里只有产物
+（`_piano.mid` / `_五线谱.pdf` / `_大谱表.xml` / `_钢琴.wav`），`测试用曲/` 里也没有这首。
+所以先从产物取证，再用冻结分轨做 A/B —— 见 147.5 最后一条，本轮的结论**不覆盖**琵琶曲本身。
+
+### 147.1 产物说了什么
+
+新增 `lang_dev/_probe_melody_split.py`、`_probe_left_hand_content.py`、
+`_probe_melody_slice.py`、`_probe_score_rhythm.py`（都不碰源码，只读产物）。琵琶曲：
+
+| 量到的 | 值 | 含义 |
+|---|---|---|
+| 左手音域 / 右手音域 | 29~59 / 60~83 | **零重叠，切点正好在 60** |
+| 旋律候选 <C4 | 205 / 678（30.2%） | 一条线有三成落在 C4 以下 |
+| ≤0.25s 换手 | 557 次（每 0.31s） | 两手在互相打断 |
+| 左手「自我八度加倍」 | **119 个（左手 20.0%）** | 本音和它的高八度被同时留下 |
+| 左右手起音错位 | 226 处，中位 23ms | 本该同时的音被拆成两个声部 |
+
+「音域零重叠且切在 60」是 `_simple_piano` 按音高硬切（`split_pitch=60`）的指纹；
+谱面解析另证：`divisions=4`、非 16 分格起音 **0/1141**，即错位会被量化吸收，
+用户看到的是**每小节 11.3 个起音点、两手都在跑 16 分**，不是量化残渣。
+
+产物里 `G1+G2`、`F1+F2`、`A1+A2` 成对出现（有的同时、有的差 14~93ms）——
+这不是和声，是**同一条贝斯线被写了两遍**。
+
+### 147.2 为什么会被留下
+
+`_simple_piano` 的左右手都是 `fix_hand(max_notes=4, mode="mix")`，而它的
+`max_span=14` **刚好容得下一个八度(12)**：识别把一个贝斯音同时写成「本音 + 高八度」时，
+两个音都在跨度限制内，于是都留下来。
+分轨路径 `fuse_to_piano` 的左手是 `max_notes=1, mode="accomp"`（只留最低音贝斯骨干），
+本来就没这个问题 —— 但**出厂产物 100% 走回炉(简洁模式)**，也就是 `_simple_piano`。
+
+### 147.3 修法
+
+新增 `_collapse_octave_doubling(hand, window=0.08)`：保留本窗最低音，删掉与它相差
+整数个八度的音。在 `_simple_piano` 里 **R1 之后**调用：
+
+```python
+left, right, _gapst = _enforce_octave_gap(left, right)   # R1：拉到整整一个八度
+left = _collapse_octave_doubling(left)                   # ← 新增：去掉自我加倍
+left = _soft_velocity(left, lo=40, hi=100)
+```
+
+三条边界都是刻意的：
+
+- **只动左手**。改右手（`mode="melody"`）2026-09-20 已被实测否定并回退，
+  t3-A 的取证就写在 `_simple_piano` 的注释里，不重开。
+- **窗口只向后看 80ms**，与 `fix_hand` 同口径。相隔 >80ms 的 `G1→G2` 交替是
+  真实舞曲贝斯型态，删了就是把音乐改坏 —— 有单测钉住。
+- **放在 R1 之后**：处理的是最终音高，且只会加大两手间距、不会缩小 R1 的成果。
+
+### 147.4 自检
+
+`_test_handgap_accomp.py` 新增**第 15 节 22 项**（89 → **111/111**），含负控：
+C3+E3+G3 三和弦保留、相隔 93ms 的根音/八度交替保留、右手一个音都不动。
+
+### 147.5 冻结分轨 A/B（jiabin，臂 B）
+
+`regress_one.py --song jiabin --arm B --code <改动前快照|工作区>`，两臂各跑完整管线：
+
+| 指标 | 基线 | 新版 | 变化 |
+|---|---|---|---|
+| sim | 0.9444 | 0.9412 | **−0.0032** |
+| DTW cost | 0.0572 | 0.0606 | +0.0034 |
+| n_notes | 2728 | 2554 | −174 |
+| 碎片率 frag | 0.004032 | **0.003132** | **−22.3%** |
+| 左手自我八度加倍 | 177（12.1%） | **7（0.5%）** | **−96%** |
+| 右手音数 / 右手加倍 | 1278 / 80 | 1278 / 80 | **完全不动** |
+
+- 目标达成：左手加倍去掉 96%，且**右手逐项不变** —— 证明改动范围就是设计范围。
+- 代价是 sim −0.0032，落在项目既有的绝对窗口 0.005 以内；碎片率反而降了 22%。
+- 剩下 7 个加倍来自**本函数之后**才跑的补音（`_fill_hand_gaps` / R2b）与最后一遍 R1，
+  够不到属正常，不追。
+- ⚠️ **琵琶曲本身还没复验**：缺源音频。这条 A/B 是拿同类失效机制的曲目
+  （jiabin 人声时值 52.3% 在 C4 以下，与琵琶曲同因）做的验证，不等于琵琶曲已修好。
+
+### 147.6 出货 exe
+
+| | 值 |
+|---|---|
+| 文件 | `dist/TuneScript AI V0.5.1.exe` |
+| 大小 | 547.8 MB |
+| sha256 | `D3DEDF56A9FAB63D47EB8B92B0F61434E7B7F5B53C232A78AB1947A460CC1E6C` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（sha `C70A3C2ECA1B2B47…`） |
+| 归档校验 | `_verify_exe.py` **57 项 0 问题**（内容层能看到 `_collapse_octave_doubling`） |
+| cookie | 构建日志：`[spec] 构建目录没有 netease_cookie.txt，本次不烤入 cookie` |
+
+`_verify_exe.py` 的 `WANT_MAIN` 加了这一项才叫真验证：在那之前，用改动前的源码
+打出来的 exe 也能过 56 项 —— 它认不出装的是新代码还是旧代码。
+
+### 147.7 附属：把这条定手链画出来
+
+`.archify/workflow-hand-rhythm-20260930-182652/hand-rhythm.html`
+（archify workflow · showcase 档，validate / deliver / check / **browser-check** 四闸全过）。
+5 lane：音频输入 → 主旋律路径 / 伴奏路径 → 定手与补音 → 结果与判据，把
+「按音高切手」和「R1 只保护人声那侧」摆在一起，并把「没有判据能拦」标在
+`左右手抢节奏` 上。
+
+⚠️ 画布宽高比有下限：1234×794（1.554）刚好过 1.55。低于 1.55 且没声明
+intrinsic-height fit 时，desktop Reader 既不能收窄也不能纵向滚动，会判
+`composition/viewport-height`（`renderers/shared/desktop-readability.mjs`）。
+宽度上限则是别处算出来的 1240px（8px 源字号 × 930/1240 = 6.0px 投影下限）。
