@@ -29,6 +29,9 @@ PUBLISHED = [
     'asr_refine.py', 'lyrics_fetch.py', 'lyrics_match.py', 'make_icon.py',
     # 公开首页 —— 最显眼的文件，以前没人扫过它
     'README.md', 'CONSTRAINTS.md',
+    # 交接文档（2026-10-01 新增）：它是**专门写给下一个 AI 看的**，
+    # 出现助手口吻的概率比任何文件都高，却在 PUBLISHED 名单外 —— 必须纳入扫描。
+    'HANDOFF.md',
 ]
 DEV_DIR = 'lang_dev'
 
