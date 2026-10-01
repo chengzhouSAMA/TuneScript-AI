@@ -61,6 +61,13 @@ def main():
     check('转谱页有 开始转谱 按钮', hasattr(tp, 'start_btn'))
     check('转谱页有 音频/BV/网易云/输出目录 四个输入',
           all(hasattr(tp, v) for v in ('audio_var', 'bvid_var', 'ne_var', 'outdir_var')))
+    check('转谱页有「分轨后手动勾选识别音轨」开关', hasattr(tp, 'pick_var'))
+    check('转谱页有勾选对话框及其工作线程入口',
+          hasattr(tp, '_ask_stems') and hasattr(tp, '_stem_dialog'))
+    check('勾选清单里人声/鼓写明了不可改的原因（R1/R3）',
+          '必须保留' in tp._STEM_LABEL.get('vocals', '')
+          and '不识别' in tp._STEM_LABEL.get('drums', ''),
+          tp._STEM_LABEL.get('vocals', '') + ' | ' + tp._STEM_LABEL.get('drums', ''))
     np_ = shell.pages['netease']
     check('网易云页有 搜索按钮 + 结果表 + 下载按钮',
           hasattr(np_, 'search_btn') and hasattr(np_, 'tv') and hasattr(np_, 'dl_btn'))
@@ -199,6 +206,37 @@ def main():
     check('_work 里不碰 Tk 变量（它在工作线程跑）',
           not any(v in wk_src for v in ('sep_var', 'simple_var', 'mt3_var')),
           'sep_var/simple_var/mt3_var 必须先在主线程读出来')
+    check('_work 里也不碰 pick_var（同样必须先在主线程读出）',
+          'pick_var' not in wk_src)
+    pick_src = inspect.getsource(ui_app.TranscribePage._ask_stems)
+    check('_ask_stems 走 ask_main（工作线程不直接碰 Tcl）',
+          'ask_main' in pick_src and 'after' not in pick_src)
+    dlg_src = inspect.getsource(ui_app.TranscribePage._stem_dialog)
+    check('勾选对话框拦住「一条伴奏都没勾」',
+          '至少勾一条伴奏轨' in dlg_src and 'disabled' in dlg_src,
+          '一条都不留时管线会拿人声当伴奏')
+    check('勾选对话框里人声与鼓固定禁用（R1/R3 不是可选项）',
+          "cb.configure(state='disabled')" in dlg_src and "'vocals', 'drums'" in dlg_src)
+
+    # ask_main：工作线程提问 → 主线程回答，值必须回得来（勾选对话框就靠它）。
+    # 这里不手工调 _poll（那会叠加出多条重复的轮询链），页面自己的 120ms 轮询就够。
+    import threading as _th
+    _got = {}
+
+    def _worker_ask():
+        _got['v'] = tp.ask_main(lambda: ['piano'])
+
+    _wt = _th.Thread(target=_worker_ask, daemon=True)
+    _wt.start()
+    for _i in range(200):
+        root.update()
+        _time.sleep(0.01)
+        if not _wt.is_alive():
+            break
+    _wt.join(timeout=2)
+    check('ask_main：工作线程能从主线程拿回返回值', _got.get('v') == ['piano'], str(_got))
+    check('ask_main 在主线程直接调用不死锁（自己等自己）',
+          tp.ask_main(lambda: 'inline') == 'inline')
 
     # 真跑一遍：任务必须被执行到，且子类方法还在
     pg3 = shell.pages['transcribe']

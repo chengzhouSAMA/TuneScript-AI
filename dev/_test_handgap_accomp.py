@@ -470,6 +470,50 @@ check('接入后左手不再是"本音+高八度"两条线',
 check('右手音符数不受影响', len(_ru) == 10, 'R=%d 音' % len(_ru))
 check('右手音高不动', {p for _, _, p, _ in _ru} == {74})
 
+# ---------------------------------------------------------------------------
+# 分轨后勾选识别音轨（2026-10-01 新增）
+# 设计：勾选 = **过滤传给识别的那份 stems 字典**，合并逻辑一行不动
+# （_merge_accomp_stems 本来就按 ACCOMP_PRIORITY 逐档 stems.get(k)，缺轨自动跳过）。
+# ---------------------------------------------------------------------------
+_all_stems = {'drums': 'd.wav', 'bass': 'b.wav', 'other': 'o.wav',
+              'vocals': 'v.wav', 'piano': 'p.wav', 'guitar': 'g.wav'}
+check('PICKABLE_STEMS 就是 ACCOMP_PRIORITY（顺序即优先级，单一来源）',
+      T.PICKABLE_STEMS == tuple(T.ACCOMP_PRIORITY), '%s' % (T.PICKABLE_STEMS,))
+check('人声与鼓都不可勾选（R1 要人声进右手 / R3 鼓点不识别）',
+      'vocals' not in T.PICKABLE_STEMS and 'drums' not in T.PICKABLE_STEMS)
+
+check('keep=None → 原样返回同一个对象（cli 与旧 GUI 行为不变）',
+      T.filter_stems(_all_stems, None) is _all_stems)
+_pick1 = T.filter_stems(_all_stems, ('piano',))
+check('只勾钢琴 → 只剩人声+钢琴',
+      sorted(_pick1) == ['piano', 'vocals'], '%s' % sorted(_pick1))
+check('勾选后鼓一定不在结果里（R3：鼓点不识别）', 'drums' not in _pick1)
+check('勾选不修改入参字典（长度仍是 6）', len(_all_stems) == 6, '%d' % len(_all_stems))
+_pick_empty = T.filter_stems(_all_stems, [])
+check('一条伴奏都没勾时人声仍在（人声由管线强制保留）',
+      sorted(_pick_empty) == ['vocals'], '%s' % sorted(_pick_empty))
+
+_noop_logs = []
+check('_apply_stem_pick(picker=None) 是空操作（不传 picker = 不勾选）',
+      T._apply_stem_pick(_all_stems, None, _noop_logs.append) is _all_stems
+      and not _noop_logs)
+_pick_logs = []
+_picked = T._apply_stem_pick(_all_stems, lambda s: ('guitar', 'bass'),
+                             _pick_logs.append)
+check('勾选后返回过滤字典', sorted(_picked) == ['bass', 'guitar', 'vocals'],
+      '%s' % sorted(_picked))
+check('勾选结果写进日志（保留项与跳过项都在）',
+      any('人工勾选识别音轨' in m and 'bass' in m and 'piano' in m for m in _pick_logs),
+      '%s' % _pick_logs)
+_cancelled = False
+try:
+    T._apply_stem_pick(_all_stems, lambda s: None, _pick_logs.append)
+except T.PipelineCancelled:
+    _cancelled = True
+check('对话框取消 → 抛 PipelineCancelled（不是静默按原样继续）', _cancelled)
+check('PipelineCancelled 是异常类（能被专门分支接住）',
+      issubclass(T.PipelineCancelled, Exception))
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:

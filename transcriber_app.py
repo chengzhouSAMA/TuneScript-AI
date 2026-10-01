@@ -3217,8 +3217,57 @@ def render_score_pdf(ms_exe, xml_path, pdf_path, left, right, bpm,
     )
 
 
+# --------------------------------------------------------------------------
+# 分轨后的人工勾选识别音轨
+# --------------------------------------------------------------------------
+class PipelineCancelled(Exception):
+    """用户在「勾选识别音轨」这一步点了取消 —— 中止整条管线，不是失败。"""
+
+
+# 可勾选的音轨 = 参与伴奏合并的那几档（就是 R3 的 ACCOMP_PRIORITY：
+# piano > guitar > other > bass）。顺序即显示顺序与优先级，单一来源。
+PICKABLE_STEMS = tuple(ACCOMP_PRIORITY)
+
+
+def filter_stems(stems, keep):
+    """按勾选结果过滤分轨字典，返回新字典（不改入参）。
+
+    keep  = 勾选保留的轨名集合；`None` = 不做勾选，原样返回（= 改动前行为）。
+    `vocals` 一律保留：R1 要求人声进右手，而且 `transcribe_stems` 直接索引
+    `stems['vocals']`，把它过滤掉会 KeyError。不要人声请走「简洁模式」。
+
+    ⚠️ 调用方要保证 keep 里至少有一条**伴奏**轨。一条都不留时
+    `_merge_accomp_stems` 返回 (None, None)，随后 `transcribe_stems` 里那句
+    `stems.get('other', stems['vocals'])` 会退化成「拿人声当伴奏」，左手变垃圾。
+    这条不变式由 UI 拦（一条伴奏都没勾时「开始识别」禁用），管线侧不重复校验。
+    """
+    if stems is None or keep is None:
+        return stems
+    want = set(keep) | {"vocals"}
+    return {k: v for k, v in stems.items() if k in want}
+
+
+def _apply_stem_pick(stems, stem_picker, progress):
+    """分轨之后、识别之前的人工作业点（GUI 专有；cli/旧 GUI 不传 picker → 空操作）。
+
+    `stem_picker(stems)` 返回保留的轨名集合，返回 `None` 表示取消。
+    """
+    if not stems or stem_picker is None:
+        return stems
+    picked = stem_picker(dict(stems))
+    if picked is None:
+        raise PipelineCancelled()
+    kept = filter_stems(stems, picked)
+    dropped = sorted(k for k in stems if k not in kept)
+    progress('人工勾选识别音轨：保留 %s%s'
+             % ('+'.join(sorted(kept)),
+                ('，跳过 ' + '+'.join(dropped)) if dropped else ''))
+    return kept
+
+
 def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
-                 use_separation=True, simple_mode=False, use_mt3=False):
+                 use_separation=True, simple_mode=False, use_mt3=False,
+                 stem_picker=None):
     """完整管线，progress(str) 用于回报状态。返回产物路径字典。
 
     两种模式：
@@ -3229,6 +3278,9 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
       - use_mt3=True(AI 智能识别增强)：分轨时用 ByteDance 钢琴转录模型
         重点识别和弦(人声→和弦→贝斯，CPU 接近实时，比 MT3 快约 6 倍)；
         不分轨则整曲 MT3(限时 90 秒)。失败自动回退常规流程。
+      - stem_picker=callable(可选，GUI 专有)：分轨完成后回调一次，返回要保留的
+        轨名集合；返回 None = 用户取消，抛 PipelineCancelled 中止整轮。
+        不传 = 不勾选，两条分轨路径的行为与改动前逐字节一致。
 
     核心保证：要么三样产物(MIDI/钢琴WAV/五线谱PDF)全部有效生成，
     要么抛异常报错——绝不允许出现“生成了曲子却没有对应五线谱”的状态。
@@ -3267,11 +3319,14 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                 progress('和弦增强：先分离四轨，再重点识别和弦…')
                 stems = separate_stems(decoded, out_dir, base, progress)
                 if stems:
+                    stems = _apply_stem_pick(stems, stem_picker, progress)
                     res = transcribe_stems_enhanced(stems, model_path, progress,
                                                     out_dir=out_dir)
                     if res is not None:
                         midi_data, left, right = res
                         progress('和弦增强识别完成，进入谱面整理。')
+            except PipelineCancelled:
+                raise
             except Exception as e:
                 midi_data = left = right = None
                 progress(f'和弦增强识别不可用({e})，退回常规流程…')
@@ -3299,6 +3354,7 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
     elif use_separation and midi_data is None:
         stems = separate_stems(decoded, out_dir, base, progress)
         if stems:
+            stems = _apply_stem_pick(stems, stem_picker, progress)
             res = transcribe_stems(stems, model_path, progress, out_dir=out_dir)
             if res is not None:
                 midi_data, left, right = res

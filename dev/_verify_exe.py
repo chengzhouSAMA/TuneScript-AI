@@ -172,17 +172,26 @@ def main():
                  ("EXIT_USAGE", "用法错误退 2"),
                  ("cli_error", "结构化错误输出（单行 JSON）"),
                  ("AUDIO_NOT_FOUND", "找不到音频的错误码"),
-                 ("ui_app", "新版多入口 UI（惰性 import，必须在包里）"))
+                 ("ui_app", "新版多入口 UI（惰性 import，必须在包里）"),
+                 ("PipelineCancelled", "分轨勾选取消 → 中止整轮（不是失败）"),
+                 ("filter_stems", "分轨后勾选：按勾选过滤分轨字典"),
+                 ("PICKABLE_STEMS", "可勾选音轨 = 参与伴奏合并的档位"),
+                 ("_apply_stem_pick", "分轨后勾选：识别前的人工作业点"),
+                 ("stem_picker", "run_pipeline 的勾选回调参数（GUI 传，cli 不传）"))
     n_content = 0   # 下面几组内容层检查的总项数，最后汇总用
     # 新版 UI 里的关键件必须真的编译进了 ui_app（模块在 ≠ 内容是新的）
     WANT_UI = (("CookieBar", "cookie 输入栏"),
                ("TS_UI_PAGE", "初始页环境变量"),
                ("TS_UI_GEOMETRY", "窗口位置环境变量"),
-               ("_mask", "cookie 脱敏"))
+               ("_mask", "cookie 脱敏"),
+               ("pick_var", "分轨后勾选识别音轨的开关"),
+               ("_ask_stems", "分轨后勾选：工作线程侧入口"),
+               ("_stem_dialog", "分轨后勾选：主线程模态清单"))
     # 滚轮滚动也在 ui_kit 里，分开查（模块在 ≠ 内容是新的）
     WANT_UIKIT = (("bind_wheel", "给控件挂滚轮"),
                   ("_build_scroll", "内容区做成可滚动"),
-                  ("_sync_scrollbar", "滚动条按需显示"))
+                  ("_sync_scrollbar", "滚动条按需显示"),
+                  ("ask_main", "工作线程→主线程同步提问"))
     n_content = len(WANT_CONST) + len(WANT_MAIN) + len(WANT_UI) + len(WANT_UIKIT)
     if pyz_name is None:
         bad += n_content

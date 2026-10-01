@@ -292,6 +292,12 @@ def main():
             'best_bad, best_t, best_off = bad',
             '（五线谱 PDF 与 MIDI 已生成',
         )
+        # 本轮（2026-10-01 分轨后勾选识别音轨）：`run_pipeline` 多了一个可选参数
+        # stem_picker，签名第二行被改写。行为不变的证据在 _test_handgap_accomp.py：
+        # 不传 picker 时 _apply_stem_pick 是空操作、filter_stems(None) 原样返回同一个对象。
+        known_del += (
+            "use_separation=True, simple_mode=False, use_mt3=False):",
+        )
         # 删掉**纯注释行或空行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。
         # 注意 difflib 的删除行首还带一个 '-'，判断注释前要先剥掉。

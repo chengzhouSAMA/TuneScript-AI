@@ -3266,3 +3266,96 @@ intrinsic-height fit 时，desktop Reader 既不能收窄也不能纵向滚动�
    （或者明确接受"只在非回炉产物上有效"这个前提）—— 这是所有后续 A/B 的前置。
 2. **预设是空壳**：四个语种的识别参数同一套（149.5），所以现在即使 LID 判对了语种，
    也只会换掉填充与对齐单位。**先给语种真参数，再谈收益**，否则 A/B 一定测不出差异。
+
+## 150. 分轨后勾选识别音轨（GUI 专有）—— 勾选 = 过滤那份 stems 字典
+
+用户要求：「添加勾选识别音轨功能，即在分轨后在进行一次勾选然后ai识别」。
+做法是**不给合并逻辑加参数**，而是在分轨完成、识别开始之前插一个人工作业点。
+
+### 150.1 为什么"过滤字典"就够
+
+`_merge_accomp_stems()`（`transcriber_app.py:273`）本来就按 `ACCOMP_PRIORITY` 逐档
+`stems.get(k)` + `os.path.isfile` 校验，**缺轨自动跳过**。所以"勾选"只要过滤传进去的字典，
+加权合并、电平锚点（只降不升）、近乎空轨跳过这些纪律一行都不用碰。
+
+### 150.2 接线（三个文件）
+
+| 位置 | 东西 |
+|---|---|
+| `transcriber_app.py:3223` | `PipelineCancelled`（用户取消 ≠ 失败） |
+| `transcriber_app.py:3229` | `PICKABLE_STEMS = tuple(ACCOMP_PRIORITY)`（单一来源） |
+| `transcriber_app.py:3232` | `filter_stems(stems, keep)`：纯函数，`keep=None` 原样返回同一个对象 |
+| `transcriber_app.py:3250` | `_apply_stem_pick()`：分轨后 / 识别前的人工作业点 |
+| `transcriber_app.py:3270` | `run_pipeline(..., stem_picker=None)` |
+| `:3322` / `:3357` | 两个分轨调用点（mt3 路 / 常规路）各插一行；`:3328` 让取消穿透 mt3 的 `except Exception` |
+| `ui_kit.py:418` | `Page.ask_main()`：工作线程提问 → 主线程执行 → 值回传（走已有的 queue 通道） |
+| `ui_kit.py:448` | `_poll` 的 `ask` 分支 |
+| `ui_app.py:416` | `pick_var`（默认开） |
+| `ui_app.py:524` / `:531` | `_ask_stems()`（工作线程侧）/ `_stem_dialog()`（主线程模态清单） |
+
+**为什么不让工作线程直接开对话框**：Tk 控件只能在主线程建。`ask_main` 只往 `Page.q` 放一条
+`('ask', (fn, box))`，由主线程的 `_poll`（每 120ms）取出来执行，再把值塞回 `box` 并 `set()`
+事件 —— 和日志走同一条通道，不需要新的同步约定，也不用从工作线程调 `after`（那是碰 Tcl）。
+它在主线程被调用时**直接执行**（否则就是"自己等自己"死锁）。
+
+**出厂行为不变**：`--cli`（`transcriber_app.py:4403`）与旧 GUI（`:4182`）都不传
+`stem_picker` → `_apply_stem_pick` 是空操作。这条由单元自检钉住（`keep=None` 返回同一对象）。
+
+### 150.3 R1/R3 决定了哪些轨可勾
+
+- **人声不可取消**：R1 要求它进右手，且 `transcribe_stems` 直接索引 `stems['vocals']`
+  （`transcriber_app.py:2696/2698`）—— 过滤掉会 KeyError。不要人声请走「简洁模式」。
+- **鼓不可勾**：R3「鼓点不识别」。
+- 可勾的就是 `ACCOMP_PRIORITY` 那四档（piano / guitar / other / bass）。
+- ⚠️ **至少要勾一条伴奏轨**：一条都不留时 `_merge_accomp_stems` 返回 `(None, None)`，
+  随后 `transcriber_app.py:2708` 的 `stems.get('other', stems['vocals'])` 会退化成
+  「拿人声当伴奏」，左手变垃圾。这条不变式**只由 UI 拦**（没勾够时「开始识别」禁用），
+  管线侧不重复校验 —— 这是刻意的，别在管线里再加一层。
+
+### 150.4 两条真踩过的坑（这轮）
+
+1. **`edit` 工具按"多数行尾"重写整个文件。** `transcriber_app.py` 原本是
+   CRLF 4146 + 裸 LF 253 的混合行尾，改一次就变成全 CRLF；`ui_app.py` 同理（8 行）。
+   而 `_selfcheck._diff` 是**二进制 + `splitlines(keepends=True)`**（`_selfcheck.py:55-59`，
+   行尾算内容）→ 审计当场从 +140/-15 变成 +283/-158，报「158 行未登记删除」。
+   修法：拿**改动前快照**与当前文件做**忽略行尾的行级合并**，未改动的行连行尾原样搬回
+   （改完 `transcriber_app.py` 是 +57/-1，正是本轮的账）。
+   ⇒ **改完这两个文件先跑 `_selfcheck`，看删除行数有没有爆炸。**
+2. **`_floor_guard` 的 F6 会把"文档里写下的模式名"当成凭据。** 它在 `_floor_guard.py:40`
+   明确写了"F6 不设限 —— 密钥写进文档一样是泄露"，没有白名单。`HANDOFF.md:333` 那句
+   "提交前扫一遍：〈模式名〉/〈模式名〉/〈模式名〉"被判成 MUSIC_U cookie —— **误报，但守卫没错**。
+   要在文档里提模式名，就别写成能被正则命中的形态。
+
+### 150.5 顺带核实的两条 LID 事实（补 §149）
+
+- **Silero lang95 有粤语类**：`lang_id_models/lang_dict_95.json` 第 **85** 类 =
+  `zh-HK, Chinese`（18=zh-CN、94=zh-TW），`lang_id.py:78` 早就把它映射成 `yue`。
+  所以 §149 的"Silero 不吐 cantonese"**准确说法是"从不赢"**：粤语曲 jiabin 的 137 个有效窗里
+  zh-HK 最高 p=**0.2026**、最好排名第 2，只在 **1/61** 个窗里赢；普通话曲最高 p≈**0.0056**。
+  （信号差 36 倍，但门是 0.35。）
+- **Qwen 强制粤语会改输出，而且是改坏**：`qwen_asr/inference/utils.py:37-68` 的
+  `SUPPORTED_LANGUAGES` 第 3 项就是 `Cantonese`。实测（jiabin vocals 60~110 s，
+  真值歌词由 `lyrics_fetch.py` 取回）**输出全变繁体**，与简体真值的字符相似度
+  0.724 → **0.563**；而「不强制 + 歌词上下文偏置」是 0.724 → **0.804**。
+  ⚠️ 偏置通道（`lang_id_qwen_runner.py:69` 读 `job["context"]`）**产品侧从未接线**：
+  `lang_id.py:318-320` 构造的 job 里没有 `context` 键，四个文件 grep 零命中。
+  要做歌词偏置，先补这个键（挂开关、默认关），并把排期让到 `lyrics_fetch` 之后。
+
+### 150.6 本轮验收与出货
+
+| | 值 |
+|---|---|
+| 单元自检 | 111 → **123**（+12：过滤 / 取消 / 空操作 / 日志） |
+| 新版 UI | 54 → **63**（+9：含 `ask_main` 真跑一遍握手） |
+| 归档自检 | **104/104**（行尾事故修好后） |
+| exe 内容层 | **70 项 0 问题**（WANT_MAIN +5、WANT_UI +3、WANT_UIKIT +1） |
+| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.78 MB** |
+| sha256 | `ED5DF2FA137D6E6F5B17EB535DCF14D8DBC3E882FABE29EDD330119887EC7BDC` |
+| 上一版备份 | `dist/_backup_pre_stempick_TuneScript AI V0.5.1.exe`（550.24 MB，`16E5E2D7…4FFD`） |
+| 冒烟 | OFF 11/11、ON 12/12，两臂 rc=0（明细 `lang_dev/_smoke_exe.json`） |
+| 钩子端到端 | ① 取消 → 抛 `PipelineCancelled`、产物 **0** 个 ② 只勾 piano → 日志「保留 piano+vocals，跳过 bass+drums+guitar+other」、`res['stems']=['piano','vocals']`、MIDI/PDF/WAV 齐全 |
+| 已知红 | `floor` 的 F6 误报（`HANDOFF.md:333`），与本轮改动无关；`git status` 为空可证 |
+
+**没被自动覆盖的部分**：模态对话框本身没有点击级自动化测试 —— 63 项 newui 只证明了
+控件能建、`ask_main` 握手能回值、`_work` 不碰 Tk 变量。**出货前请人工跑一次**：
+① 勾选全留（产物应等于改动前）② 只留钢琴 ③ 点「取消」（应中止且不报错）。

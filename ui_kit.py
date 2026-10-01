@@ -415,6 +415,24 @@ class Page(tk.Frame):
             self.q.put(('call', (on_main, r)))
         threading.Thread(target=_t, daemon=True).start()
 
+    def ask_main(self, fn, timeout=None):
+        """从**工作线程**请求主线程执行 `fn()` 并等回它的返回值（阻塞当前线程）。
+
+        与 `after()` 的区别：从工作线程调 `after` 是在碰 Tcl；这里只往队列放一条请求，
+        交给主线程的 `_poll`（每 120ms）执行 —— 和日志走同一条通道，不需要新的同步约定。
+        `fn` 抛异常时返回 None 并把异常写进日志，不炸整条管线。
+
+        典型用法：分轨跑完要让用户勾选音轨，而 Tk 控件只能在主线程建。
+        """
+        box = {'v': None, 'e': threading.Event()}
+        if threading.current_thread() is threading.main_thread():
+            # 主线程调它就是"自己等自己" → 必然死锁。直接执行，省得以后有人踩。
+            return fn()
+        self.q.put(('ask', (fn, box)))
+        if not box['e'].wait(timeout):
+            self.log('⚠️ 等待界面应答超时，按「未勾选」继续。')
+        return box['v']
+
     def _poll(self):
         try:
             while True:
@@ -427,6 +445,16 @@ class Page(tk.Frame):
                         fn(arg)
                     except Exception as e:
                         self.log('回调出错：%s: %s' % (type(e).__name__, e))
+                elif kind == 'ask':
+                    # 工作线程要主线程替它做一件事并回值（见 ask_main）。
+                    fn, box = payload
+                    try:
+                        box['v'] = fn()
+                    except Exception as e:
+                        box['v'] = None
+                        self.log('⚠️ 交互步骤出错：%s: %s' % (type(e).__name__, e))
+                    finally:
+                        box['e'].set()
                 elif kind == 'done':
                     self.set_busy(False)
                     self.set_status('完成。')

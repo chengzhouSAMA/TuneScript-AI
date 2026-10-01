@@ -169,6 +169,11 @@ jiabin 也几乎不变，只有 fanwut 明显。**别拿一首歌的结论定默
 不是"换个检查对象"。修法是：名字原样保留（F3 按断言文本前 60 字判身份，**改名等于删除**），
 判据改成"当前源码里还在不在"。
 
+⚠️ **F6 会把"文档里写下的模式名"当成凭据**（2026-10-01 实测）。`_floor_guard.py:40` 写的是
+"F6 不设限 —— 密钥写进文档一样是泄露"，**没有白名单**，`CONSTRAINTS.md` 那条例外也管不到它。
+本文件 §10 那句「提交前扫一遍：〈模式名〉...」就被判成 `MUSIC_U` cookie —— **误报，但守卫没错**。
+⇒ 地板守卫在改了 `HANDOFF.md` 之后会持续报这一条；要引用模式名，别写成能被正则命中的形态。
+
 ---
 
 ## 6. 交付纪律（违反任何一条都算没做完）
@@ -262,18 +267,19 @@ Remove-Item Env:\TS_PUSH_KEY
 
 | | 值 |
 |---|---|
-| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**550.2 MB** |
-| sha256 | `16E5E2D7C48C64A0521B8EC6C37B186E56D64A57B3F1E4738892A179DE7E4FFD` |
-| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`） |
+| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.78 MB** |
+| sha256 | `ED5DF2FA137D6E6F5B17EB535DCF14D8DBC3E882FABE29EDD330119887EC7BDC` |
+| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`，更早一版）；本轮快照 `dist/_backup_pre_stempick_TuneScript AI V0.5.1.exe`（550.24 MB，`16E5E2D7…4FFD`） |
 | 桌面快捷方式 | `C:\Users\35968\Desktop\TuneScript AI V0.5.1.lnk` |
-| 验收 | fast 7 / task 13 / full 16 **全绿**；`_verify_exe` 61 项 0 问题 |
+| 验收 | fast 7/7、task 13 项 **12 绿**、full 16 项 **15 绿** —— 唯一红是地板守卫 F6 误报（见 §5）；`_verify_exe` **70 项 0 问题**；冒烟 OFF 11/11 + ON 12/12 |
 | 远端 main | `232d38c` |
-| 本地 | 领先 1 个提交（`5e7c757` 待推）；工作区干净 |
+| 本地 | 领先 3 个提交（`5e7c757` / `260291e` / 分轨勾选那轮 待推）；工作区干净 |
 
 **残留物**（用户知道的，别自作主张清理）：
 
 - 两个 TuneScript 进程自 01:44 起一直跑着（PID 14028 / 38796），启动自
   `dist/fidelity_candidate/`。**不要静默杀掉正在跑的实例。**
+  （2026-10-01 09:2x 复核：这两个进程**已经不在**了，进程列表为空 —— 那时才敢重打 exe。）
 - `dist/` 里有 **2277 MB 的 exe**：出货 + 备份 + 两个候选
   （`studio_candidate/` 是出货版的逐字节副本，可删；`fidelity_candidate/` 被上面两个进程占着）。
 - `promo_video/` 是宣传片工作区（2.4 GB 媒体 + pip 依赖），**已 gitignore**，不是出货源码。

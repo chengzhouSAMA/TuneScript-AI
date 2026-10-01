@@ -413,6 +413,10 @@ class TranscribePage(Page):
         self.simple_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.simple_var,
                         text='简洁模式（不分轨、经典流程，更快更稳定）').pack(anchor='w', pady=2)
+        self.pick_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.pick_var,
+                        text='分轨后手动勾选识别音轨（分离完先让你挑，再开始识别）'
+                        ).pack(anchor='w', pady=2)
 
         _o3, c3 = card(self.body, pady=(8, 0))
         row = tk.Frame(c3, bg=K.N_CARD)
@@ -456,12 +460,13 @@ class TranscribePage(Page):
         self.open_btn.configure(state='disabled')
         # ⚠️ 选项必须在**主线程**里先读出来。`_work` 跑在工作线程，
         #    在那里碰 Tk 变量会抛 `RuntimeError: main thread is not in main loop`。
-        opts = (self.sep_var.get(), self.simple_var.get(), self.mt3_var.get())
+        opts = (self.sep_var.get(), self.simple_var.get(), self.mt3_var.get(),
+                self.pick_var.get())
         self.run(lambda p: self._work(audio, bvid, query, outdir, opts, p),
                  self._done, '正在转谱…')
 
     def _work(self, audio, bvid, query, outdir, opts, progress):
-        from transcriber_app import run_pipeline
+        from transcriber_app import PipelineCancelled, run_pipeline
         if not audio and bvid:
             from bilibili import fetch_audio
             progress('正在按 BV 号获取 B站音频…')
@@ -478,12 +483,20 @@ class TranscribePage(Page):
             if not audio:
                 raise RuntimeError('网易云下载失败：%s' % (info.get('reason') or '未知原因'))
             progress('已下载：%s' % audio)
-        return run_pipeline(audio, outdir, self.app.model_path, self.app.ms_exe,
-                            self.app.ffmpeg, progress,
-                            use_separation=opts[0], simple_mode=opts[1],
-                            use_mt3=opts[2])
+        try:
+            return run_pipeline(audio, outdir, self.app.model_path, self.app.ms_exe,
+                                self.app.ffmpeg, progress,
+                                use_separation=opts[0], simple_mode=opts[1],
+                                use_mt3=opts[2],
+                                stem_picker=(self._ask_stems if opts[3] else None))
+        except PipelineCancelled:
+            progress('已在「勾选识别音轨」这一步取消，本轮不出谱。')
+            return None
 
     def _done(self, r):
+        if not r:
+            self.log('已取消，未生成任何产物。')
+            return
         pdfs = r.get('pdf') or []
         if isinstance(pdfs, str):
             pdfs = [pdfs]
@@ -499,6 +512,92 @@ class TranscribePage(Page):
         self.log('✅ 完成。')
         self.open_btn.configure(state='normal')
         messagebox.showinfo('完成', '已生成：\n' + '\n'.join(lines))
+
+    # ---- 分轨后勾选识别音轨（工作线程 → 主线程的模态清单） ----
+    _STEM_LABEL = {'vocals': '人声 —— 主旋律来源，按 R1 必须保留',
+                   'piano': '钢琴',
+                   'guitar': '吉他',
+                   'other': '其他 / 电子音（无人声段会单独强化）',
+                   'bass': '贝斯 —— 优先性最后，按 0.40 权重并入（R3）',
+                   'drums': '鼓 —— 不识别（R3）'}
+
+    def _ask_stems(self, stems):
+        """工作线程侧：把勾选对话框丢回主线程执行并等它返回。
+
+        返回保留的轨名列表；用户取消返回 None。**本身不碰任何 Tk 控件**。
+        """
+        return self.ask_main(lambda: self._stem_dialog(stems))
+
+    def _stem_dialog(self, stems):
+        """主线程侧：模态勾选清单。返回勾选保留的轨名列表；取消返回 None。
+
+        人声（R1 要它进右手，且管线直接索引 stems['vocals']）与鼓（R3 不识别）
+        固定不可改，所以这里只让人挑伴奏。至少要勾一条伴奏轨 —— 一条都不留时
+        管线会退化成「拿人声当伴奏」，所以一条没勾就禁用「开始识别」。
+        """
+        from transcriber_app import PICKABLE_STEMS
+        order = [s for s in ('vocals',) if s in stems]
+        order += [s for s in PICKABLE_STEMS if s in stems]
+        order += [s for s in ('drums',) if s in stems]
+        order += [s for s in sorted(stems) if s not in order]
+        box = {'v': None}
+        win = tk.Toplevel(self)
+        win.title('勾选识别音轨')
+        win.configure(bg=K.N_CARD)
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        body = tk.Frame(win, bg=K.N_CARD, padx=18, pady=14)
+        body.pack(fill='both', expand=True)
+        tk.Label(body, text='分轨已完成。勾选要参与 AI 识别的音轨：',
+                 bg=K.N_CARD, fg=K.N_TEXT, font=(K.UI_FONT, 10)).pack(anchor='w')
+
+        def _picked():
+            return [k for k in PICKABLE_STEMS if k in stems and vars_[k].get()]
+
+        def _sync(*_a):
+            ok = bool(_picked())
+            btn_ok.configure(state=('normal' if ok else 'disabled'))
+            tip.configure(text='' if ok else '至少勾一条伴奏轨（人声不算伴奏）')
+
+        def _confirm():
+            box['v'] = _picked()
+            win.destroy()
+
+        def _cancel():
+            box['v'] = None
+            win.destroy()
+
+        vars_ = {}
+        for k in order:
+            v = tk.BooleanVar(value=(k != 'drums'))
+            vars_[k] = v
+            cb = ttk.Checkbutton(body, style='NCard.TCheckbutton', variable=v,
+                                 text=self._STEM_LABEL.get(k, k))
+            if k in ('vocals', 'drums'):
+                cb.configure(state='disabled')     # R1 要人声 / R3 不要鼓，不给改
+            else:
+                cb.configure(command=_sync)
+            cb.pack(anchor='w', pady=1)
+        btnrow = tk.Frame(body, bg=K.N_CARD)
+        btnrow.pack(anchor='w', fill='x', pady=(12, 0))
+        btn_ok = ttk.Button(btnrow, text='开始识别', style='NPrimary.TButton',
+                            command=_confirm)
+        btn_ok.pack(side='left')
+        ttk.Button(btnrow, text='取消', style='NSecond.TButton',
+                   command=_cancel).pack(side='left', padx=8)
+        tip = tk.Label(body, text='', bg=K.N_CARD, fg=K.N_WARN, font=(K.UI_FONT, 9))
+        tip.pack(anchor='w', pady=(6, 0))
+        win.protocol('WM_DELETE_WINDOW', _cancel)
+        _sync()
+        win.update_idletasks()
+        root = self.winfo_toplevel()
+        x = root.winfo_rootx() + max(0, (root.winfo_width() - win.winfo_reqwidth()) // 2)
+        y = root.winfo_rooty() + max(0, (root.winfo_height() - win.winfo_reqheight()) // 3)
+        win.geometry('+%d+%d' % (x, y))
+        win.wait_visibility()
+        win.grab_set()
+        win.wait_window()
+        return box['v']
 
 
 # ---------------------------------------------------------------------------
