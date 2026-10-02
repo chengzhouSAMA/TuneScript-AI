@@ -263,17 +263,17 @@ Remove-Item Env:\TS_PUSH_KEY
 
 ---
 
-## 8. 当前状态（2026-10-01）
+## 8. 当前状态（2026-10-02）
 
 | | 值 |
 |---|---|
-| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.78 MB** |
-| sha256 | `ED5DF2FA137D6E6F5B17EB535DCF14D8DBC3E882FABE29EDD330119887EC7BDC` |
-| 上一版备份 | `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`，更早一版）；本轮快照 `dist/_backup_pre_stempick_TuneScript AI V0.5.1.exe`（550.24 MB，`16E5E2D7…4FFD`） |
+| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.79 MB** |
+| sha256 | `C5824B51247F80F883C7832218BCF3E567E8194EA4498BECD121E80E19CF616A` |
+| 上一版备份 | 更早一版 `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`）；`_backup_pre_stempick_…exe`（550.24 MB，`16E5E2D7…4FFD`）；`_backup_pre_confjudge_…exe` 与 `_backup_pre_logfix_…exe`（均 547.79 MB，`4C35DCD8…`） |
 | 桌面快捷方式 | `C:\Users\35968\Desktop\TuneScript AI V0.5.1.lnk` |
-| 验收 | fast 7/7、task 13 项 **12 绿**、full 16 项 **15 绿** —— 唯一红是地板守卫 F6 误报（见 §5）；`_verify_exe` **70 项 0 问题**；冒烟 OFF 11/11 + ON 12/12 |
+| 验收 | fast 7/7、task 13 项 **12 绿**、full 16 项 **15 绿** —— 唯一红是地板守卫 F6 误报（见 §5）；`_verify_exe` **78 项 0 问题**；冒烟 OFF 11/11 + ON 12/12 |
 | 远端 main | `232d38c` |
-| 本地 | 领先 3 个提交（`5e7c757` / `260291e` / 分轨勾选那轮 待推）；工作区干净 |
+| 本地 | 本地这几轮**都没推**（远端仍 `232d38c`）；具体差几个提交看 `git -C _gh_repo log --oneline origin/main..HEAD`（**别在文档里写死数字 —— 写的那一刻就被自己这条提交改掉了**）。工作区干净 |
 
 **残留物**（用户知道的，别自作主张清理）：
 
