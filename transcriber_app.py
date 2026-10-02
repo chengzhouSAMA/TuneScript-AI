@@ -2935,6 +2935,10 @@ def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=F
         L.append(f'          <alter>{alter}</alter>')
     L.append(f'        <octave>{octave}</octave></pitch>')
     L.append(f'        <duration>{dur}</duration>')
+    if is_triplet_dur(dur, score_grid_div()):
+        # 3:2 三连音。没这一句 MuseScore 只会看到一个"怪长度"，不会当成三连音。
+        L.append('        <time-modification><actual-notes>3</actual-notes>'
+                 '<normal-notes>2</normal-notes></time-modification>')
     if tie_start:
         L.append('        <tie type="start"/>')
     if tie_stop:
@@ -3008,9 +3012,45 @@ def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True, colors=None)
     return out
 
 
-def _total_bars(notes, bpm, bar_div=16):
+# --------------------------------------------------------------------------
+# 记谱网格（divisions/四分）—— 决定引擎"能不能表示三连音"
+# --------------------------------------------------------------------------
+# MusicXML 一个 part 只有一个 divisions，最小可写单位 = 1/divisions 个四分：
+#   DIV=4  → 最小 16 分音符。**三连音在数学上表示不了**：1/3 个四分 = 1.333 单位。
+#   DIV=12 → 16 分 = 3、八分三连 = 4、八分 = 6、四分 = 12 ⇒ 三连音与二分网格同时可写。
+# 默认 4 = 出厂行为：此时 dur*4 % DIV 恒为 0，一个 <time-modification> 都不会输出。
+ENV_DIVISIONS = "TS_DIVISIONS"
+
+
+def score_grid_div():
+    """当前记谱 divisions/四分。`TS_DIVISIONS` 覆盖；非法值回落 4（出厂行为）。"""
+    try:
+        v = int(os.environ.get(ENV_DIVISIONS) or 4)
+    except (TypeError, ValueError):
+        return 4
+    return v if 1 <= v <= 96 else 4
+
+
+def is_triplet_dur(dur, div):
+    """该时值在 div 网格下是不是**干净的三连音值**（要写 3:2 time-modification）。
+
+    只在 div 能被 3 整除时有意义；三连音八分 = div/3，干净值取 {t/2, t, 2t, 4t}。
+    不干净的值（边界切分切出来的任意时长）**不标** —— 交给 MuseScore 自己拆连音线，
+    这和默认网格下 5/16、7/16 的处理方式一致。
+    """
+    if div % 3 or dur <= 0:
+        return False
+    if (dur * 4) % div == 0:          # 能落在二分网格上 → 本来就不是三连音
+        return False
+    t = div // 3
+    return dur in (t // 2, t, 2 * t, 4 * t)
+
+
+def _total_bars(notes, bpm, bar_div=None):
     """按音符最晚结束时间估算总小节数（至少 1）。"""
-    DIV = 4
+    DIV = score_grid_div()
+    if bar_div is None:
+        bar_div = 4 * DIV
     quarter = 60.0 / bpm
     if not notes:
         return 1
@@ -3057,9 +3097,9 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
     bpm = float(bpm)
     if not (30.0 <= bpm <= 240.0):
         bpm = 120.0
-    DIV = 4        # 每四分音符的 divisions = 4 → 16 分音符网格
+    DIV = score_grid_div()   # 默认 4 = 16 分网格（出厂行为）；12 起可写三连音
     quarter = 60.0 / bpm
-    bar_div = 16   # 4/4 每小节 = 16 个 16 分音符
+    bar_div = 4 * DIV        # 4/4 每小节 = 4 个四分 = 4×DIV 个最小单位
 
     def to_div(t):
         # 十六分网格；不再把快速同音音节压成同一个八分槽位。

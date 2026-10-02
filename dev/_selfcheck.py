@@ -106,8 +106,8 @@ def main():
             _missing = [s for s in _syms if s not in _src]
             check("历轮声明的实现仍在源码里：%s" % _what, not _missing,
                   ("缺 %s" % "、".join(_missing)) if _missing else "按源码内容判，不依赖 diff 基线")
-        check("新增行数在理智范围内（<=400；仅防意外大改，不是预算）",
-              len(adds) <= 400, "新增 %d 行" % len(adds))
+        check("新增行数在理智范围内（<=600；仅防意外大改，不是预算）",
+              len(adds) <= 600, "新增 %d 行" % len(adds))
         known_del = ("notes_of(stems['vocals']", "请选择音频文件", "需提供 --audio 或 --bvid",
                      "B站音频与转谱产物", "args=(audio, bvid, outdir)",
                      "def _worker(self, audio, bvid, outdir)", "填 BV 号则自动下载后转谱",
@@ -117,6 +117,17 @@ def main():
         # 本轮（R1/R2）：两处旧伴奏整理被整体换成 _build_accomp 调用。
         # 它们在 transcribe_stems_enhanced 与 transcribe_stems 里各出现一次，
         # 代码结构逐行相同，所以这里按「行内容」而不是按位置登记。
+        # 本轮（2026-10-02 P1 记谱网格参数化）：`build_score_xml` 与 `_total_bars`
+        # 原来把 DIV=4 / bar_div=16 写死 —— 那正是"三连音在数学上表示不了"的原因
+        # （1/3 个四分 = 1.333 个单位）。改成从 `TS_DIVISIONS` 取（默认仍 4）。
+        # 默认值下 dur*4 % DIV 恒为 0 ⇒ 一个 <time-modification> 都不会输出，
+        # 即**出厂产物逐字节不变**；这一点由单元自检与冒烟两臂一起钉住。
+        known_del += (
+            "def _total_bars(notes, bpm, bar_div=16):",
+            "    DIV = 4",   # _total_bars 里那行是裸的，不带注释
+            "    DIV = 4        # 每四分音符的 divisions = 4 → 16 分音符网格",
+            "    bar_div = 16   # 4/4 每小节 = 16 个 16 分音符",
+        )
         known_del += (
             "harmony = _sparsify_harmony(",
             "_suppress_pad_notes(_filter_high_hallucination(other_notes)),",
@@ -333,6 +344,9 @@ def main():
         _h, adds_all, dels_all = _diff(anchor, p)
         print("     累计（相对 V0.5 出货）：+%d / -%d" % (len(adds_all), len(dels_all)))
         # 上限只是"防静默大改"的护栏，不是预算。每轮把这些数写出来，涨就跟着抬。
+        # 2026-10-02 第三次抬（400→600）：基线仍是 pre_studio，自那以后累积了
+        # 分轨勾选 / 三件功能 / MuseScore 按钮 / P1 记谱网格四轮，单轮 diff 自然涨过 400；
+        # 累计上限 1600 仍卡着（当前 ~1535），删除上限 240 也没放松。
         # 2026-10-01 实测 +1111/-192；本轮是解码/制谱保真修复，新增
         # 回归测试与外部 MuseScore 验证，仍远低于人工审阅上限。
         # 2026-10-01 再抬：分轨勾选 +393（+1213），三件功能轮再 +271（+1484）。

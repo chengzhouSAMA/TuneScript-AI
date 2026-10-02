@@ -573,6 +573,42 @@ check('没有可判音频时不炸，返回 ok=False',
 check('run_pipeline 有 lang_seg 形参（GUI 高级模式用它显式开分段）',
       "lang_seg" in _inspect.signature(T.run_pipeline).parameters)
 
+# ---------------------------------------------------------------------------
+# P1 记谱网格（2026-10-02）：divisions 参数化 —— 三连音终于在数学上表示得了
+# （DIV=4 时 1/3 个四分 = 1.333 个单位，写不出来；DIV=12 时 16分=3、八分三连=4）
+# ---------------------------------------------------------------------------
+os.environ.pop("TS_DIVISIONS", None)
+check('默认 divisions/四分 = 4（16 分网格 = 出厂行为）', T.score_grid_div() == 4)
+os.environ["TS_DIVISIONS"] = "12"
+check('TS_DIVISIONS=12 → 12（三连音与二分网格同时可写）', T.score_grid_div() == 12)
+for _bad in ("abc", "0", "999", "-3"):
+    os.environ["TS_DIVISIONS"] = _bad
+    check('非法 TS_DIVISIONS=%r 回落 4（不炸）' % _bad, T.score_grid_div() == 4)
+os.environ.pop("TS_DIVISIONS", None)
+check('DIV=4 下没有任何时值会被判成三连音（⇒ 出厂产物一个 time-modification 都不输出）',
+      not any(T.is_triplet_dur(_d, 4) for _d in range(1, 65)))
+check('DIV=12 下干净三连音值恰为 {2,4,8,16}',
+      [_d for _d in range(1, 25) if T.is_triplet_dur(_d, 12)] == [2, 4, 8, 16])
+check('二分网格值不算三连音（6=八分、12=四分）',
+      not T.is_triplet_dur(6, 12) and not T.is_triplet_dur(12, 12))
+check('div 不是 3 的倍数时一律不判三连音',
+      not any(T.is_triplet_dur(_d, 8) for _d in range(1, 33)))
+import tempfile as _tf   # 本块专用
+_keep = os.environ.get("TS_DIVISIONS")
+os.environ["TS_DIVISIONS"] = "12"
+_p1x = os.path.join(_tf.mkdtemp(prefix="p1chk_"), "t.xml")
+T.write_grand_staff_xml([(0.5, 0.75, 48, 80)],
+                        [(0.0, 1 / 6.0, 60, 80), (1 / 6.0, 2 / 6.0, 62, 80),
+                         (2 / 6.0, 0.5, 64, 80)], _p1x, bpm=120.0)
+_p1t = open(_p1x, encoding="utf-8").read()
+check('DIV=12 真产物：divisions=12，且三个八分三连音各带一个 time-modification',
+      "<divisions>12</divisions>" in _p1t and _p1t.count("<time-modification>") == 3,
+      'tm=%d' % _p1t.count("<time-modification>"))
+if _keep is None:
+    os.environ.pop("TS_DIVISIONS", None)
+else:
+    os.environ["TS_DIVISIONS"] = _keep
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:
