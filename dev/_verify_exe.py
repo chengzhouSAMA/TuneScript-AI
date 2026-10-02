@@ -194,7 +194,8 @@ def main():
                ("_ask_stems", "分轨后勾选：工作线程侧入口"),
                ("_stem_dialog", "分轨后勾选：主线程模态清单"),
                ("mode_var", "简单/高级模式单选"),
-               ("conf_var", "谱面置信度着色开关"))
+               ("conf_var", "谱面置信度着色开关"),
+               ("ms_btn", "「在 MuseScore 中打开」按钮"))
     # 滚轮滚动也在 ui_kit 里，分开查（模块在 ≠ 内容是新的）
     WANT_UIKIT = (("bind_wheel", "给控件挂滚轮"),
                   ("_build_scroll", "内容区做成可滚动"),

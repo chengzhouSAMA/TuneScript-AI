@@ -3481,3 +3481,28 @@ GUI 单选 `mode_var`（默认 **advanced**）：
    （保住"回调坏了不连带失败"的意图，又不静默吞掉）。
    ⇒ **F2 是 diff 级检查**：从别处抄容错写法前，先想它在新位置会不会被算成"新增"。
    （这一改让源码变了 ⇒ 按纪律必须**重打 exe**，本轮因此构建了两次。）
+
+## 152. GUI「在 MuseScore 中打开」按钮（2026-10-02）
+
+用户要求：GUI 上加一个快捷按钮，调用 MuseScore 的命令行接口。
+
+- `ui_app.TranscribePage._open_in_musescore()` → `subprocess.Popen([ms_exe, xml])`。
+  **打开的是 MusicXML 而不是 PDF** —— XML 才是可编辑、能直接播放的乐谱源，PDF 是成品。
+- 目标路径来自 `run_pipeline` 结果新增的 `results['xml']`（原先只返回 midi/pdf/wav，
+  按钮根本拿不到确切目标）。
+- ⚠️ **跑管线期间这个按钮被禁用**（加进 `_BUSY_ATTRS`）：MuseScore 占着谱面时，管线里那次
+  渲染会失败（`render_score_pdf` 的报错原文就是"若 MuseScore 程序当前正在打开，请先关闭它再重试"）。
+- 用户在勾选对话框点取消 → `_done(None)` 提前返回 → 按钮不会被误启用。
+
+验收：新版 UI 68 → **72/72**（+4：按钮存在、走 Popen 传路径不拼 shell 串、期间禁用、
+打开的是 XML 不是 PDF）；`_verify_exe` 78 → **79 项 0 问题**；冒烟两臂 OFF 11/11 + ON 12/12。
+
+| | 值 |
+|---|---|
+| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.79 MB** |
+| sha256 | `A9562AFD18A9F8ED39BE00AC88131A89AF1B3D6FE3F9EBDCA3861ED0E8E79F8F` |
+| 上一版备份 | `dist/_backup_pre_msbutton_TuneScript AI V0.5.1.exe`（547.79 MB，`C5824B51…`） |
+
+**顺带核实的一条外部事实**（写进 §151.4 的方法同源）：MuseScore CLI 能**直接导 PNG**
+（`MuseScore4.exe -f -o score.png xxx.xml` → 一叠分页图，免窗口、确定性），
+`-T --trim-image` 可裁边 —— 这是后续"效果展示"该走的路，不是开窗截屏。

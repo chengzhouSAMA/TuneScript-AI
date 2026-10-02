@@ -267,11 +267,11 @@ Remove-Item Env:\TS_PUSH_KEY
 
 | | 值 |
 |---|---|
-| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.79 MB** |
-| sha256 | `C5824B51247F80F883C7832218BCF3E567E8194EA4498BECD121E80E19CF616A` |
-| 上一版备份 | 更早一版 `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`）；`_backup_pre_stempick_…exe`（550.24 MB，`16E5E2D7…4FFD`）；`_backup_pre_confjudge_…exe` 与 `_backup_pre_logfix_…exe`（均 547.79 MB，`4C35DCD8…`） |
+| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.79 MB**（含「在 MuseScore 中打开」按钮）|
+| sha256 | `A9562AFD18A9F8ED39BE00AC88131A89AF1B3D6FE3F9EBDCA3861ED0E8E79F8F` |
+| 上一版备份 | 更早一版 `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`）；`_backup_pre_stempick_…exe`（550.24 MB，`16E5E2D7…4FFD`）；`_backup_pre_confjudge_…exe` 与 `_backup_pre_logfix_…exe`（均 547.79 MB，`4C35DCD8…`）、`_backup_pre_msbutton_…exe`（547.79 MB，`C5824B51…`） |
 | 桌面快捷方式 | `C:\Users\35968\Desktop\TuneScript AI V0.5.1.lnk` |
-| 验收 | fast 7/7、task 13 项 **12 绿**、full 16 项 **15 绿** —— 唯一红是地板守卫 F6 误报（见 §5）；`_verify_exe` **78 项 0 问题**；冒烟 OFF 11/11 + ON 12/12 |
+| 验收 | fast 7/7、task 13 项 **12 绿**、full 16 项 **15 绿** —— 唯一红是地板守卫 F6 误报（见 §5）；`_verify_exe` **79 项 0 问题**；冒烟 OFF 11/11 + ON 12/12 |
 | 远端 main | `232d38c` |
 | 本地 | 本地这几轮**都没推**（远端仍 `232d38c`）；具体差几个提交看 `git -C _gh_repo log --oneline origin/main..HEAD`（**别在文档里写死数字 —— 写的那一刻就被自己这条提交改掉了**）。工作区干净 |
 

@@ -379,7 +379,8 @@ def qr_login_dialog(parent, on_success=None):
 # 1) 转谱
 # ---------------------------------------------------------------------------
 class TranscribePage(Page):
-    _BUSY_ATTRS = ('start_btn', 'audio_entry', 'bvid_entry', 'ne_entry', 'outdir_entry')
+    _BUSY_ATTRS = ('start_btn', 'audio_entry', 'bvid_entry', 'ne_entry', 'outdir_entry',
+                   'ms_btn')
 
     def __init__(self, master, app):
         super().__init__(master, app, '转谱',
@@ -434,6 +435,10 @@ class TranscribePage(Page):
                                    state='disabled',
                                    command=lambda: open_in_explorer(self.outdir_var.get()))
         self.open_btn.pack(side='left', padx=8)
+        self.ms_btn = ttk.Button(row, text='在 MuseScore 中打开', style='NSecond.TButton',
+                                 state='disabled', command=self._open_in_musescore)
+        self.ms_btn.pack(side='left')
+        self._ms_target = None
 
     def _start(self):
         audio = self.audio_var.get().strip()
@@ -507,6 +512,9 @@ class TranscribePage(Page):
         if not r:
             self.log('已取消，未生成任何产物。')
             return
+        self._ms_target = r.get('xml')
+        if self._ms_target:
+            self.ms_btn.configure(state='normal')
         pdfs = r.get('pdf') or []
         if isinstance(pdfs, str):
             pdfs = [pdfs]
@@ -522,6 +530,32 @@ class TranscribePage(Page):
         self.log('✅ 完成。')
         self.open_btn.configure(state='normal')
         messagebox.showinfo('完成', '已生成：\n' + '\n'.join(lines))
+
+    def _open_in_musescore(self):
+        """把刚生成的 MusicXML 交给 MuseScore 打开（命令行传路径即开 GUI）。
+
+        为什么开 XML 而不是 PDF：XML 才是可编辑、可直接播放的乐谱源；PDF 是成品。
+
+        ⚠️ MuseScore 占着谱面时管线里那次渲染会失败（`render_score_pdf` 的报错原文
+        就是"若 MuseScore 程序当前正在打开，请先关闭它再重试"）。所以这个按钮
+        在跑管线期间被禁用 —— `_BUSY_ATTRS` 里带着它。
+        """
+        tgt = self._ms_target
+        if not tgt or not os.path.isfile(tgt):
+            messagebox.showwarning('提示', '还没有可打开的乐谱，先转一次谱。')
+            return
+        ms = self.app.ms_exe
+        if not ms or not os.path.isfile(ms):
+            messagebox.showerror('错误', '未找到 MuseScore4.exe，请先安装 MuseScore 4。')
+            return
+        import subprocess
+        try:
+            subprocess.Popen([ms, tgt])
+        except Exception as e:
+            self.log('❌ 调用 MuseScore 失败：%s: %s' % (type(e).__name__, e))
+            messagebox.showerror('出错', '调用 MuseScore 失败：%s' % e)
+            return
+        self.log('已在 MuseScore 中打开：%s' % tgt)
 
     # ---- 分轨后勾选识别音轨（工作线程 → 主线程的模态清单） ----
     _STEM_LABEL = {'vocals': '人声 —— 主旋律来源，按 R1 必须保留',

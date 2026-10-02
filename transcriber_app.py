@@ -3973,6 +3973,7 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                              % (type(_e5).__name__, _e5))
 
     results = {'midi': midi_path, 'pdf': pdf_paths, 'wav': out_wav}
+    results['xml'] = xml_path
     if stems:
         results['stems'] = stems
     if lang_info:

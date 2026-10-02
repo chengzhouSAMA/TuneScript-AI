@@ -227,6 +227,15 @@ def main():
     check('_work 把高级模式映射成 分轨+语种分段 两开关同开',
           'use_separation=adv' in wk_src and 'simple_mode=(not adv)' in wk_src
           and 'lang_seg=adv' in wk_src)
+    ms_src = inspect.getsource(ui_app.TranscribePage._open_in_musescore)
+    check('转谱页有「在 MuseScore 中打开」按钮', hasattr(tp, 'ms_btn'))
+    check('该按钮走 MuseScore 命令行（Popen 传 XML 路径，不拼 shell 串）',
+          'Popen([ms, tgt])' in ms_src and 'ms_exe' in ms_src
+          and 'shell' not in ms_src)
+    check('跑管线期间该按钮被禁用（MuseScore 占着文件会让渲染失败）',
+          'ms_btn' in ui_app.TranscribePage._BUSY_ATTRS)
+    check('按钮打开的是 XML 而不是 PDF（XML 才是可编辑/可播放的源）',
+          "r.get('xml')" in inspect.getsource(ui_app.TranscribePage._done))
 
     # ask_main：工作线程提问 → 主线程回答，值必须回得来（勾选对话框就靠它）。
     # 这里不手工调 _poll（那会叠加出多条重复的轮询链），页面自己的 120ms 轮询就够。
