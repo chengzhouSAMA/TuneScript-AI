@@ -3359,3 +3359,125 @@ intrinsic-height fit 时，desktop Reader 既不能收窄也不能纵向滚动�
 **没被自动覆盖的部分**：模态对话框本身没有点击级自动化测试 —— 63 项 newui 只证明了
 控件能建、`ask_main` 握手能回值、`_work` 不碰 Tk 变量。**出货前请人工跑一次**：
 ① 勾选全留（产物应等于改动前）② 只留钢琴 ③ 点「取消」（应中止且不报错）。
+
+## 151. 置信度着色 + 整曲语种判断 + 简单/高级模式（三件）
+
+用户一次点了三件：① 语种识别默认接进回炉管线（至少整曲判断）② GUI 切换简单/高级模式
+③ 输出 PDF 加置信度颜色标注（校对导航）。三件都落地并各自带负面对照。
+
+### 151.1 谱面置信度着色（第三件）
+
+**通道**：`predict()` 返回的 note_events 里那个 `amplitude`（音符后验分数，0~1）——
+`transcribe_notes` / `transcribe_to_midi` 里调 `_conf_record_events()` 记进 `_NOTE_CONF`
+（按音高分桶）。写谱时 `_score_colors(hands, to_div)` 把它变成
+`{(绝对槽位, 音高): 颜色}`，交给 `_staff_lines` → `_xml_note(color=...)` →
+`<note color="#RRGGBB">`。
+
+⚠️ **不能用 velocity**：它在下游被 `_soft_velocity` 按左右手重映射（左 80~120、右 80~120；
+另一条路径 40~100/50~110）并且有 `_fill_hand_gaps` 的 `max(v, floor)` 抬底 —— 那已经是
+"力度层次"，拿它上色只会画出"这个音是左手还是右手"。`transcriber_app.py:2907` 的老注释
+也早写着"velocity 属于 MIDI 播放，乐谱 XML 忽略"。
+
+**为什么颜色要覆盖整个时值**：`norm_split` 会把跨小节长音按小节线拆成逐段、每段单独写
+`<note>`，续段的起音槽位不再是原始起音。只标起点的话，续段全部掉进"查不到"→ 一片蓝。
+
+| 档 | 颜色 | 含义 |
+|---|---|---|
+| 高（≥`TS_NOTE_CONF_HI`，默认 0.6） | **不上色**（保持黑） | 模型确信 —— 谱面照旧干净，只把可疑的挑出来 |
+| 中（`TS_NOTE_CONF_LO`~HI，默认 0.35~0.6） | 橙 `#E08A00` | 大概对，值得看一眼 |
+| 低（<LO） | 红 `#CC0000` | 疑似错音 |
+| 查不到来源 | 蓝 `#2255CC` | 补音/合成/被 R1 搬过八度且对不上 —— 最可疑的一类 |
+
+开关：`TS_NOTE_CONF_COLOR`（默认 **1**，用户要求开）+ GUI「谱面置信度着色」勾选框
+（走 `set_note_conf_color()` 覆盖，不动环境变量）。查表先精确音高、再 ±12/±24（R1 会搬八度），
+同音高内取起音相差 ≤60ms 的最近邻（碎音合并会微调起音）。
+
+**实测（shiki 30 s 切片，只识别 piano+vocals）**：
+
+| 量 | 值 |
+|---|---|
+| 置信度分布 | n=185，min 0.202 / 中位 **0.624** / max 0.824；高 99、中 70、低 16 |
+| 查表命中 | **103/103，miss=0**（说明八度+近邻回退够用） |
+| 产物 XML | 112 个 `<note>` 里 **60 个**带 `color=` |
+| 产物 PDF | `(0.88,0.54,0)`×46 + `(0.8,0,0)`×14 + 黑 1248 |
+| 阴性对照 `TS_NOTE_CONF_COLOR=0` | XML **0 个** color、PDF 只有 `(0,0,0)`/`(1,1,1)` |
+
+### 151.2 整曲语种判断（第一件，默认接入）
+
+`judge_language(mix_wav, stems, progress)`：**只报告、不参与任何取舍** —— 所以"默认开"
+不会改变出厂谱面，这是它敢默认开的前提。关掉：`TS_LANG_JUDGE=0`。
+
+- 输入优先**人声轨**（分轨成功时），否则整曲混音 —— 带鼓/贝斯的混音上 LID 会明显变差
+- 后端固定 **Silero**（`TS_LANG_JUDGE_BACKEND`）：Qwen 那条实测 221.6 s/166 窗，默认开太贵
+- 窗默认 10/10（`TS_LANG_JUDGE_WIN/HOP`）；候选白名单默认 `zh,ja,en,yue`
+  —— **不设白名单时整曲票会被无关语种稀释**，实测会飘到 km/bn/yi 这类（§150.5 的数字）
+- 结果写进 `results['lang']`，并打两行日志（判断 + 票权）
+
+实测：shiki 判 **日语 67%**（票权 `ja=20 zh=10`，来源人声轨，30 s 切片 0.1 s）；
+152 s 曲目单独跑 18.1 s。关掉时 `results['lang'] = {"ok": false, "reason": "TS_LANG_JUDGE=0"}`。
+
+### 151.3 简单 / 高级模式（第二件）
+
+GUI 单选 `mode_var`（默认 **advanced**）：
+
+| 模式 | 翻译成 |
+|---|---|
+| 简单模式 | `use_separation=False, simple_mode=True`（不分轨、整曲识别） |
+| 高级模式 | `use_separation=True, simple_mode=False, **lang_seg=True**`（分轨 + 语种分段） |
+
+`run_pipeline(..., lang_seg=None)` → `transcribe_stems(..., lang_seg=None)`：
+`None` 时跟随 `TS_LANG_SEG`（`--cli` 与旧 GUI 不传 → 行为逐字节不变）。
+旧的 `sep_var`/`simple_var` 两个复选框**已并入单选**（同一件事不再两处口径）。
+
+⚠️ **高级模式的实际成本**：语种分段走 `lang_pipeline`，后端由 `TS_LANG_BACKEND` 决定
+（未设 = `auto` → **Qwen**），实测一首 3 分钟歌的 LID 约 221 s（纯 CPU）。这是既有行为
+（§149.1 早就记着），不是本轮引入的；但既然高级模式默认开它，就该让人知道。
+想让高级模式也只用 Silero：`TS_LANG_BACKEND=silero_onnx`。
+
+### 151.4 MuseScore 认不认 `<note color>`？—— 做法可复用
+
+问"渲染器会不会吃掉我加的属性"时，别靠文档猜，**直接验产物**：
+
+1. 复制一份**真实产物 XML**，用正则给前 25 个真实音符（`<note>` 紧跟 `<pitch>` 的那些；
+   `<note><rest/>` 不算）注入 `color="#CC0000"`，再 25 个注入 `#0000CC`
+2. 用项目同一条命令导 PDF：`MuseScore4.exe -f -o out.pdf in.xml`
+3. **直接解 PDF 内容流**：按 `stream…endstream` 切、`zlib.decompress`（FlateDecode），
+   再扫颜色算子
+
+结果：注入的那份 PDF 里出现 `0.8 0 0 scn`×25 与 `0 0 0.8 scn`×25；**未上色的真实产物 0 处**
+⇒ **认，而且真的进 PDF**。另外让 MuseScore 把上色 XML 回吐成 MusicXML，`CC0000`×56 /
+`0000CC`×65 都在（它把 `<note color>` 落成了 `<stem color=...>`）。
+
+⚠️ **方法学坑**：只扫 `rg`/`RG` 会得出"没上色"的**错误结论** —— MuseScore 用的是
+`/CSp cs` + `scn`（RGB 挂在索引色彩空间名下面）。我第一遍就栽在这，差点误判成"不支持"。
+查颜色算子要把 `rg/RG/k/K/sc/scn/cs` 全表扫一遍。
+
+### 151.5 本轮验收与出货
+
+| | 值 |
+|---|---|
+| 单元自检 | 123 → **139**（+16：着色分档/回退/开关/语种判断退化/lang_seg 形参） |
+| 新版 UI | 63 → **68**（+5：模式单选、着色开关、旧变量已清除、_work 不碰新变量、模式映射） |
+| 归档自检 | **104/104**（`known_del` 登记了本轮 8 处改写行） |
+| exe 内容层 | 70 → **78 项 0 问题**（WANT_MAIN +6、WANT_UI +2） |
+| 冒烟 | OFF 11/11、ON 12/12，两臂 rc=0；**exe 日志里出现 `整曲语种：日语（来源 人声轨…）`** ⇒ 第①件在打包产物里真跑通了（`lang_dev/_smoke_exe.json`） |
+| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.79 MB**，sha256 `C5824B51247F80F883C7832218BCF3E567E8194EA4498BECD121E80E19CF616A`（第三次构建：`log()` 的空 except 被 F2 抓 ⇒ 改了源码 ⇒ 必须重打）；本轮快照 `dist/_backup_pre_confjudge_…exe`（`4C35DCD8…`）与 `dist/_backup_pre_logfix_…exe`（同前） |
+
+### 151.6 本轮自己踩的三个坑
+
+1. **`color=(colors or {}).get(bar * bar_div + s)` —— key 是元组 `(槽位, 音高)`，我写成了单值。**
+   结果：颜色全都算出来了（`_CONF_STATS` 里 mid/low 都有），XML 里却一个都没有。
+   **单例隔离测试**（合成 3 个音 + 假置信度，直接调 `write_grand_staff_xml`，再数
+   `<note color=`）一次就把它钉死 —— 比在整条管线里猜快得多。
+2. **写了 `# noqa: E402`** —— 项目明令禁止抑制注释（地板守卫 **F1** 会抓），而且 `ruff.toml`
+   根本没选 E402，写了纯属自伤。已删。
+3. **`edit` 工具按"多数行尾"重写整个文件**（§150.4 那条）：本轮改完 `transcriber_app.py` /
+   `ui_app.py` 之后**必须再跑一次行尾还原脚本**，否则 `_selfcheck` 立刻从 +393/-50 变成
+   "+630/-300 未登记"。另外它那个"累计新增"护栏（相对 V0.5 出货）本轮从 1350 抬到 1600：
+   文件里本来就写着"护栏不是预算……涨就跟着抬"，删除数仍卡在 240。
+4. **空 `except: pass` 被 F2 抓**：`judge_language` 里我照抄了 `lang_pipeline.log()` 那句
+   "进度回调坏了不连累整条管线"的写法 —— 但 `lang_pipeline.py` **不在本轮 diff 里**，
+   所以它不报警；抄进 `transcriber_app.py` 就成了**新增**的空 except。改成写 stderr
+   （保住"回调坏了不连带失败"的意图，又不静默吞掉）。
+   ⇒ **F2 是 diff 级检查**：从别处抄容错写法前，先想它在新位置会不会被算成"新增"。
+   （这一改让源码变了 ⇒ 按纪律必须**重打 exe**，本轮因此构建了两次。）

@@ -298,6 +298,20 @@ def main():
         known_del += (
             "use_separation=True, simple_mode=False, use_mt3=False):",
         )
+        # 本轮（2026-10-01 置信度着色 / 整曲语种判断 / 分轨语种分段参数化）：
+        # 五处签名各加一个可选参数，两处调用点跟着多一个实参。全部**只增行为，
+        # 默认值保持原样**：颜色开关默认跟随 TS_NOTE_CONF_COLOR、lang_seg=None 跟随
+        # TS_LANG_SEG、judge_language 只报告不参与取舍。
+        known_del += (
+            "def transcribe_stems(stems, model_path, progress, out_dir=None):",
+            "    if os.environ.get('TS_LANG_SEG', '0') == '1':",
+            "def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=False):",
+            "def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True):",
+            "                tie_stop=with_ties and (s < sl or te))",
+            "                X += _staff_lines(splice[bar][i], bar, bar_div, i, i, with_ties=with_ties)",
+            "                X += _staff_lines(segs, bar, bar_div, i, i, with_ties=with_ties)",
+            "            res = transcribe_stems(stems, model_path, progress, out_dir=out_dir)",
+        )
         # 删掉**纯注释行或空行**不可能改变行为，所以一律放行；
         # 其余删除必须命中已知的旧实现，否则视为意外改动。
         # 注意 difflib 的删除行首还带一个 '-'，判断注释前要先剥掉。
@@ -321,7 +335,9 @@ def main():
         # 上限只是"防静默大改"的护栏，不是预算。每轮把这些数写出来，涨就跟着抬。
         # 2026-10-01 实测 +1111/-192；本轮是解码/制谱保真修复，新增
         # 回归测试与外部 MuseScore 验证，仍远低于人工审阅上限。
-        check("累计新增在理智范围内（<=1350）", len(adds_all) <= 1350, "+%d" % len(adds_all))
+        # 2026-10-01 再抬：分轨勾选 +393（+1213），三件功能轮再 +271（+1484）。
+        # 抬的理由是**新功能本身**，不是放宽标准 —— 删除数仍卡在 240。
+        check("累计新增在理智范围内（<=1600）", len(adds_all) <= 1600, "+%d" % len(adds_all))
         check("累计删除在理智范围内（<=240）", len(dels_all) <= 240, "-%d" % len(dels_all))
     import ast as _ast
     try:

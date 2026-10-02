@@ -634,6 +634,7 @@ def transcribe_notes(wav_path, model, progress, label="音符", min_len=150):
     for inst in midi_data.instruments:
         for n in inst.notes:
             notes.append((n.start, n.end, n.pitch, n.velocity))
+    _conf_record_events(_notes)
     return notes
 
 
@@ -662,6 +663,7 @@ def transcribe_to_midi(wav_path, model_path, progress):
     for inst in midi_data.instruments:
         for n in inst.notes:
             all_notes.append((n.start, n.end, n.pitch, n.velocity))
+    _conf_record_events(_notes)
 
     progress("正在调整为『人能弹』的钢琴谱…")
     melody, accomp = _split_melody_accomp(all_notes)
@@ -2657,7 +2659,7 @@ def _fill_melody_gaps(vocal_notes, other_notes, gap_thresh=2.2, gaps=None):
         fill.extend(bridge)
     return vocal_notes + fill
 
-def transcribe_stems(stems, model_path, progress, out_dir=None):
+def transcribe_stems(stems, model_path, progress, out_dir=None, lang_seg=None):
     """分离轨 → 钢琴谱数据：
 
     - 人声轨 → 主旋律(右)；前奏/间奏/尾奏人声空档用和声轨最高音线补旋律；
@@ -2683,7 +2685,9 @@ def transcribe_stems(stems, model_path, progress, out_dir=None):
     # TS_LANG_SEG=1 时按语种分段扒谱（分轨之后、扒谱之前）：
     # 先对该人声轨做语种分割，每段用它自己语种的预设识别，再按全局时间轴拼回。
     # 默认关闭；任何一步失败都退回整轨识别。
-    if os.environ.get('TS_LANG_SEG', '0') == '1':
+    if lang_seg is None:
+        lang_seg = os.environ.get('TS_LANG_SEG', '0') == '1'
+    if lang_seg:
         try:
             from lang_pipeline import transcribe_vocal_by_language
             vocal_notes, _lsinfo = transcribe_vocal_by_language(
@@ -2783,8 +2787,146 @@ def _pitch_to_musicxml(pitch):
     return step, alter_map[pitch % 12], pitch // 12 - 1
 
 
-def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=False):
+# --------------------------------------------------------------------------
+# 谱面置信度着色（校对导航）
+# --------------------------------------------------------------------------
+# 通道：`transcribe_notes` 识别时把 `predict()` 返回的 note_events 里那个
+# **amplitude（音符后验分数，0~1）** 记进 `_NOTE_CONF`（按音高分桶）；
+# 写谱时按 (起音, 音高) 查回来，给 `<note>` 上 `color` 属性 —— MuseScore 4 会把它
+# 导进 PDF。2026-10-01 实测：上色 XML 导出的 PDF 内容流里出现
+# `0.8 0 0 scn`/`0 0 0.8 scn` 各 25 处（＝注入的 CC0000/0000CC），未上色产物 0 处。
+#
+# 为什么不用 velocity：它在下游被 `_soft_velocity` 按左右手重映射（左 80~120、
+# 右 80~120，另一条路径 40~100/50~110），已经是"力度层次"而不是"模型有多确信"。
+_NOTE_CONF = {}          # pitch -> [(start_s, amplitude), ...]（不排序，线性查最近）
+_CONF_ON = None          # None = 跟随环境变量；True/False = GUI 覆盖
+_CONF_STATS = {}         # 最近一次写谱的着色统计（日志用）
+
+# 颜色分档：高置信**不上色**（保持黑，谱面照旧干净），只把可疑的挑出来
+CONF_HI_DEFAULT = 0.60
+CONF_LO_DEFAULT = 0.35
+CONF_COLORS = {"mid": "#E08A00",      # 中：橙
+               "low": "#CC0000",      # 低：红
+               "none": "#2255CC"}     # 查不到来源（补音/合成/被改写）：蓝
+
+
+def set_note_conf_color(on):
+    """GUI 用它覆盖开关；传 None 表示回落到 `TS_NOTE_CONF_COLOR`。"""
+    global _CONF_ON
+    _CONF_ON = None if on is None else bool(on)
+
+
+def conf_color_enabled():
+    if _CONF_ON is not None:
+        return _CONF_ON
+    return os.environ.get("TS_NOTE_CONF_COLOR", "1") != "0"
+
+
+def _conf_thresholds():
+    """阈值可调（本机素材不同，量出来再定）；坏了就回默认。"""
+    def _f(name, d):
+        try:
+            return float(os.environ.get(name) or d)
+        except (TypeError, ValueError):
+            return d
+    hi, lo = _f("TS_NOTE_CONF_HI", CONF_HI_DEFAULT), _f("TS_NOTE_CONF_LO", CONF_LO_DEFAULT)
+    return (hi, lo) if hi > lo else (CONF_HI_DEFAULT, CONF_LO_DEFAULT)
+
+
+def _conf_record(start, pitch, amp):
+    """记一个音符的模型置信度（同一音高下按起音时间线性查，故只追加）。"""
+    try:
+        s, p, a = round(float(start), 3), int(pitch), float(amp)
+    except (TypeError, ValueError):
+        return
+    if 0.0 <= a <= 1.0:
+        _NOTE_CONF.setdefault(p, []).append((s, a))
+
+
+def _conf_record_events(note_events):
+    """把 `predict()` 的 note_events 记进置信度表。
+
+    元素顺序是 (start, end, pitch, amplitude, pitch_bend) —— amplitude 就是
+    模型给的音符后验分数（0~1），正是"校对导航"要的那个量。
+    """
+    for ev in (note_events or ()):
+        try:
+            _conf_record(ev[0], ev[2], ev[3])
+        except (TypeError, IndexError):
+            continue
+
+
+def _conf_lookup(start, pitch):
+    """查 (起音, 音高) 的置信度：先精确音高，再 ±12/±24（R1 会搬八度），
+    同一音高里取起音最近且相差 ≤60ms 的（碎音合并会微调起音）。"""
+    if not _NOTE_CONF:
+        return None
+    for pp in (pitch, pitch - 12, pitch + 12, pitch - 24, pitch + 24):
+        lst = _NOTE_CONF.get(pp)
+        if not lst:
+            continue
+        best, bestd = None, 0.061
+        for ks, a in lst:
+            d = abs(ks - start)
+            if d < bestd:
+                best, bestd = a, d
+        if best is not None:
+            return best
+    return None
+
+
+def note_conf_color(start, pitch, hi=None, lo=None):
+    """该音在谱面上的颜色；None = 不上色（高置信，保持默认黑）。"""
+    if hi is None or lo is None:
+        hi, lo = _conf_thresholds()
+    a = _conf_lookup(start, pitch)
+    if a is None:
+        return CONF_COLORS["none"]
+    if a >= hi:
+        return None
+    return CONF_COLORS["mid"] if a >= lo else CONF_COLORS["low"]
+
+
+def _score_colors(hands, to_div):
+    """把每只手里的音变成 {(绝对槽位, 音高): 颜色}，顺便记统计。"""
+    _CONF_STATS.clear()
+    if not conf_color_enabled():
+        return None
+    if not _NOTE_CONF:
+        _CONF_STATS.update({"reason": "本次没有任何 Basic Pitch 置信度记录",
+                            "hit": 0, "none": 0, "mid": 0, "low": 0})
+        return None
+    hi, lo = _conf_thresholds()
+    colors, hit, miss = {}, 0, 0
+    n_mid = n_low = 0
+    for _sign, _line, notes in hands:
+        for s, _e, p, _v in notes:
+            a = _conf_lookup(s, p)
+            if a is None:
+                miss += 1
+            else:
+                hit += 1
+            c = note_conf_color(s, p, hi, lo)
+            if c:
+                # 覆盖**整个时值**的槽位：`norm_split` 会把跨小节长音拆成逐段、
+                # 续段的起音槽位不再是原始起音，只标起点会让续段全掉进"查不到"。
+                s0, s1 = to_div(s), to_div(_e)
+                for slot in range(s0, max(s0 + 1, s1)):
+                    colors[(slot, int(p))] = c
+                if c == CONF_COLORS["low"]:
+                    n_low += 1
+                else:
+                    n_mid += 1
+    _CONF_STATS.update({"hit": hit, "none": miss, "mid": n_mid, "low": n_low,
+                        "hi": hi, "lo": lo})
+    return colors
+
+
+def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=False,
+              color=None):
     L = ['      <note>']
+    if color:
+        L[0] = '      <note color="%s">' % color
     if chord:
         L.append('        <chord/>')
     step, alter, octave = _pitch_to_musicxml(pitch)
@@ -2819,7 +2961,7 @@ def _xml_rest(dur, voice, staff):
             '      </note>']
 
 
-def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True):
+def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True, colors=None):
     """沿起止边界切分和弦，用延音线保留各音的独立时值。
 
     notes 元素为 (slot, pitch, dur, tie_start, tie_stop)，其中跨小节的
@@ -2861,7 +3003,8 @@ def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True):
             out += _xml_note(
                 p, end - sl, voice, staff, chord=(k > 0),
                 tie_start=with_ties and (e > end or ts),
-                tie_stop=with_ties and (s < sl or te))
+                tie_stop=with_ties and (s < sl or te),
+                color=(colors or {}).get((bar * bar_div + s, int(p))))
     return out
 
 
@@ -2921,6 +3064,9 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
     def to_div(t):
         # 十六分网格；不再把快速同音音节压成同一个八分槽位。
         return max(0, int(round(t / quarter * DIV)))
+
+    # 谱面置信度着色：整曲只算一次，按 (绝对槽位, 音高) 交给 _staff_lines 查
+    colors = _score_colors(hands, to_div)
 
     total_div = max(
         [max(to_div(s) + 1, to_div(e))
@@ -3030,9 +3176,11 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
                 X.append(f'      <backup><duration>{bar_div}</duration></backup>')
             if splice and bar in splice and i in splice[bar]:
                 # 参考谱拼接小节: 直接按 16 分槽位写入
-                X += _staff_lines(splice[bar][i], bar, bar_div, i, i, with_ties=with_ties)
+                X += _staff_lines(splice[bar][i], bar, bar_div, i, i,
+                                  with_ties=with_ties, colors=colors)
             else:
-                X += _staff_lines(segs, bar, bar_div, i, i, with_ties=with_ties)
+                X += _staff_lines(segs, bar, bar_div, i, i,
+                                  with_ties=with_ties, colors=colors)
         X.append('    </measure>')
     X.append('  </part>')
     X.append('</score-partwise>')
@@ -3218,6 +3366,70 @@ def render_score_pdf(ms_exe, xml_path, pdf_path, left, right, bpm,
 
 
 # --------------------------------------------------------------------------
+# 整曲语种判断（默认开；只报告，不参与取舍）
+# --------------------------------------------------------------------------
+def judge_language(mix_wav, stems=None, progress=None):
+    """整曲语种判断。**默认开**（用户要求：语种识别接进回炉管线，至少能判整曲）。
+
+    只产出一条日志 + 一个结果字段，**不参与任何取舍、不改谱面** ——
+    属于"默认开也不改变出厂行为"的那一类。关掉：`TS_LANG_JUDGE=0`。
+
+    - 输入优先**人声轨**（分轨成功时），否则整曲混音：带鼓/贝斯的混音上 LID 会明显变差。
+    - 后端固定 **Silero**（`TS_LANG_JUDGE_BACKEND`）：Qwen 那条实测 221.6 s/166 窗，
+      默认开太贵；Silero 在 152 s 曲目上实测 18.1 s。
+    - 候选白名单默认 `zh,ja,en,yue`：不设白名单时整曲票会被无关语种稀释，
+      实测会飘到 km/bn/yi 这类（`TS_LANG_JUDGE_CANDIDATES` 可改）。
+    - 窗默认 10/10（`TS_LANG_JUDGE_WIN/HOP`）。
+    """
+    def log(m):
+        if not progress:
+            return
+        try:
+            progress(m)
+        except Exception as e:
+            # 进度回调是 UI 的东西，它坏了不该连带整条管线失败；但也**不能静默吞掉**
+            # （地板守卫 F2 会把空 except 判成"偷偷吞掉失败"），所以写 stderr。
+            sys.stderr.write("整曲语种：进度回调失败(%s)\n" % type(e).__name__)
+
+    if os.environ.get("TS_LANG_JUDGE", "1") == "0":
+        return {"ok": False, "reason": "TS_LANG_JUDGE=0"}
+    src_name, src = "整曲混音", mix_wav
+    _v = (stems or {}).get("vocals")
+    if _v and os.path.isfile(_v):
+        src_name, src = "人声轨", _v
+    if not src or not os.path.isfile(src):
+        log("整曲语种：跳过（没有可判的音频）")
+        return {"ok": False, "reason": "没有可判的音频"}
+    try:
+        from lang_id import LanguageDetector
+        det = LanguageDetector(
+            backend=os.environ.get("TS_LANG_JUDGE_BACKEND") or "silero_onnx",
+            candidates=os.environ.get("TS_LANG_JUDGE_CANDIDATES") or "zh,ja,en,yue")
+        if not det.available():
+            log("整曲语种：跳过（%s）" % det.reason)
+            return {"ok": False, "reason": det.reason or "LID 不可用"}
+        win = float(os.environ.get("TS_LANG_JUDGE_WIN") or 10.0)
+        hop = float(os.environ.get("TS_LANG_JUDGE_HOP") or 10.0)
+        t0 = time.time()
+        r = dict(det.detect_song(src, win=win, hop=hop))
+        dt = time.time() - t0
+        r["source"] = src_name
+        r["backend"] = det.backend_name
+        r["seconds"] = round(dt, 1)
+        log("整曲语种：%s（来源 %s，占有效票权 %.0f%%，%d/%d 窗有效，后端 %s，%.1fs）"
+            % (r.get("name") or "未判定", src_name, 100.0 * (r.get("prob") or 0.0),
+               r.get("n_voiced") or 0, r.get("n_windows") or 0,
+               r.get("backend") or "?", dt))
+        if r.get("votes"):
+            log("    票权：%s" % "，".join("%s=%.0f" % (k, n)
+                                          for k, n in list(r["votes"].items())[:4]))
+        return r
+    except Exception as e:
+        log("整曲语种不可用(%s)，跳过。" % type(e).__name__)
+        return {"ok": False, "reason": "%s: %s" % (type(e).__name__, str(e)[:120])}
+
+
+# --------------------------------------------------------------------------
 # 分轨后的人工勾选识别音轨
 # --------------------------------------------------------------------------
 class PipelineCancelled(Exception):
@@ -3267,7 +3479,7 @@ def _apply_stem_pick(stems, stem_picker, progress):
 
 def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
                  use_separation=True, simple_mode=False, use_mt3=False,
-                 stem_picker=None):
+                 stem_picker=None, lang_seg=None):
     """完整管线，progress(str) 用于回报状态。返回产物路径字典。
 
     两种模式：
@@ -3281,6 +3493,9 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
       - stem_picker=callable(可选，GUI 专有)：分轨完成后回调一次，返回要保留的
         轨名集合；返回 None = 用户取消，抛 PipelineCancelled 中止整轮。
         不传 = 不勾选，两条分轨路径的行为与改动前逐字节一致。
+      - lang_seg=True：分轨路径做**语种分段扒谱**（`TS_LANG_SEG` 的显式版）。
+        None = 跟随环境变量；`--cli` 与旧 GUI 不传 → 跟环境变量，行为不变。
+        GUI「高级模式」显式传 True，「简单模式」根本不走分轨路径。
 
     核心保证：要么三样产物(MIDI/钢琴WAV/五线谱PDF)全部有效生成，
     要么抛异常报错——绝不允许出现“生成了曲子却没有对应五线谱”的状态。
@@ -3355,10 +3570,14 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
         stems = separate_stems(decoded, out_dir, base, progress)
         if stems:
             stems = _apply_stem_pick(stems, stem_picker, progress)
-            res = transcribe_stems(stems, model_path, progress, out_dir=out_dir)
+            res = transcribe_stems(stems, model_path, progress, out_dir=out_dir,
+                                   lang_seg=lang_seg)
             if res is not None:
                 midi_data, left, right = res
                 progress('人声/伴奏分离分析完成，进入融合。')
+
+    # ---- 整曲语种判断（默认开；只报告，不参与取舍）----
+    lang_info = judge_language(decoded, stems, progress)
 
     # ---- 兜底：常规整体分析 ----
     if midi_data is None:
@@ -3756,6 +3975,8 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
     results = {'midi': midi_path, 'pdf': pdf_paths, 'wav': out_wav}
     if stems:
         results['stems'] = stems
+    if lang_info:
+        results['lang'] = lang_info
 
     # ---- 核心保证：三样产物必须齐全有效，否则抛错 ----
     if not os.path.isfile(midi_path):

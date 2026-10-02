@@ -177,7 +177,13 @@ def main():
                  ("filter_stems", "分轨后勾选：按勾选过滤分轨字典"),
                  ("PICKABLE_STEMS", "可勾选音轨 = 参与伴奏合并的档位"),
                  ("_apply_stem_pick", "分轨后勾选：识别前的人工作业点"),
-                 ("stem_picker", "run_pipeline 的勾选回调参数（GUI 传，cli 不传）"))
+                 ("stem_picker", "run_pipeline 的勾选回调参数（GUI 传，cli 不传）"),
+                 ("judge_language", "整曲语种判断（默认开，只报告）"),
+                 ("note_conf_color", "谱面置信度着色：按置信度取颜色"),
+                 ("set_note_conf_color", "GUI 覆盖着色开关"),
+                 ("_score_colors", "把置信度映射成 (槽位,音高)->颜色"),
+                 ("_conf_lookup", "置信度查表（含八度/近邻回退）"),
+                 ("CONF_COLORS", "着色分档配色"))
     n_content = 0   # 下面几组内容层检查的总项数，最后汇总用
     # 新版 UI 里的关键件必须真的编译进了 ui_app（模块在 ≠ 内容是新的）
     WANT_UI = (("CookieBar", "cookie 输入栏"),
@@ -186,7 +192,9 @@ def main():
                ("_mask", "cookie 脱敏"),
                ("pick_var", "分轨后勾选识别音轨的开关"),
                ("_ask_stems", "分轨后勾选：工作线程侧入口"),
-               ("_stem_dialog", "分轨后勾选：主线程模态清单"))
+               ("_stem_dialog", "分轨后勾选：主线程模态清单"),
+               ("mode_var", "简单/高级模式单选"),
+               ("conf_var", "谱面置信度着色开关"))
     # 滚轮滚动也在 ui_kit 里，分开查（模块在 ≠ 内容是新的）
     WANT_UIKIT = (("bind_wheel", "给控件挂滚轮"),
                   ("_build_scroll", "内容区做成可滚动"),

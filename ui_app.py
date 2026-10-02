@@ -403,16 +403,22 @@ class TranscribePage(Page):
 
         _o2, c2 = card(self.body)
         section(c2, '选项', '默认使用演奏级编排：保留必要和声，但主动去掉重复音和不可弹的堆叠。')
-        self.sep_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.sep_var,
-                        text='人声/伴奏分离分析（更准更干净，约多花几分钟；'
+        self.mode_var = tk.StringVar(value='advanced')
+        ttk.Radiobutton(c2, style='NCard.TRadiobutton', variable=self.mode_var,
+                        value='simple',
+                        text='简单模式：不分轨、整曲识别，更快更稳（经典流程）'
+                        ).pack(anchor='w', pady=2)
+        ttk.Radiobutton(c2, style='NCard.TRadiobutton', variable=self.mode_var,
+                        value='advanced',
+                        text='高级模式：分轨 + 语种分段，更准更干净（多花几分钟；'
                              '分离出的音轨会一并保存）').pack(anchor='w', pady=2)
         self.mt3_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.mt3_var,
                         text='AI 智能识别增强（重点识别和弦，比 MT3 快约 6 倍）').pack(anchor='w', pady=2)
-        self.simple_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.simple_var,
-                        text='简洁模式（不分轨、经典流程，更快更稳定）').pack(anchor='w', pady=2)
+        self.conf_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.conf_var,
+                        text='谱面置信度着色（低置信标红、中置信标橙，便于校对）'
+                        ).pack(anchor='w', pady=2)
         self.pick_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(c2, style='NCard.TCheckbutton', variable=self.pick_var,
                         text='分轨后手动勾选识别音轨（分离完先让你挑，再开始识别）'
@@ -460,13 +466,14 @@ class TranscribePage(Page):
         self.open_btn.configure(state='disabled')
         # ⚠️ 选项必须在**主线程**里先读出来。`_work` 跑在工作线程，
         #    在那里碰 Tk 变量会抛 `RuntimeError: main thread is not in main loop`。
-        opts = (self.sep_var.get(), self.simple_var.get(), self.mt3_var.get(),
-                self.pick_var.get())
+        opts = (self.mode_var.get(), self.mt3_var.get(), self.pick_var.get(),
+                self.conf_var.get())
         self.run(lambda p: self._work(audio, bvid, query, outdir, opts, p),
                  self._done, '正在转谱…')
 
     def _work(self, audio, bvid, query, outdir, opts, progress):
-        from transcriber_app import PipelineCancelled, run_pipeline
+        from transcriber_app import (PipelineCancelled, run_pipeline,
+                                     set_note_conf_color)
         if not audio and bvid:
             from bilibili import fetch_audio
             progress('正在按 BV 号获取 B站音频…')
@@ -483,12 +490,15 @@ class TranscribePage(Page):
             if not audio:
                 raise RuntimeError('网易云下载失败：%s' % (info.get('reason') or '未知原因'))
             progress('已下载：%s' % audio)
+        adv = (opts[0] == 'advanced')
+        set_note_conf_color(opts[3])
         try:
             return run_pipeline(audio, outdir, self.app.model_path, self.app.ms_exe,
                                 self.app.ffmpeg, progress,
-                                use_separation=opts[0], simple_mode=opts[1],
-                                use_mt3=opts[2],
-                                stem_picker=(self._ask_stems if opts[3] else None))
+                                use_separation=adv, simple_mode=(not adv),
+                                use_mt3=opts[1],
+                                stem_picker=(self._ask_stems if opts[2] else None),
+                                lang_seg=adv)
         except PipelineCancelled:
             progress('已在「勾选识别音轨」这一步取消，本轮不出谱。')
             return None

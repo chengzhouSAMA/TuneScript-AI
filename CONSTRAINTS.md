@@ -41,15 +41,15 @@ python lang_dev/check.py --stage full    # 出货前（要 exe） （分钟级�
 | 工作区完整性 | 仓库里有、工作区没有的文件数 = 0 | `python lang_dev/_check_tree_sync.py` | 每次编辑 |
 | 称呼口径 | 已发布文件 0 处角色化称呼 | `python lang_dev/_strip_persona.py --check --selftest` | 每次编辑 |
 | 语法 | 所有 `.py` 过 `ast.parse` | `python lang_dev/check.py --stage fast` | 每次编辑 |
-| 单元自检 | 123/123 | `python lang_dev/_test_handgap_accomp.py` | 每次编辑 |
+| 单元自检 | 139/139 | `python lang_dev/_test_handgap_accomp.py` | 每次编辑 |
 | GUI 接线 | 0 问题 | `python lang_dev/_check_gui.py` | 每次编辑 |
 | 地板守卫自身 | 21/21 | `python lang_dev/_check_floorguard.py` | 任务结束 |
 | ruff 基线 | 0 命中（`ruff.toml` 里选了哪些规则都写了原因） | `python -m ruff check .` | 每次编辑 |
-| 新版 UI | 63/63 | `python lang_dev/_check_newui.py` | 任务结束 |
+| 新版 UI | 68/68 | `python lang_dev/_check_newui.py` | 任务结束 |
 | 推送闸门 | 18/18 | `python lang_dev/_check_pushguard.py` | 任务结束 |
 | CLI 契约 | 23/23，退出码只增不改 | `python lang_dev/_check_cli_contract.py` | 任务结束 |
 | 归档与冻结基线 | 104/104，且 `_stems/` 无新写入 | `python lang_dev/_selfcheck.py` | 任务结束 |
-| exe 内容层 | 56 项 0 问题 | `python lang_dev/_verify_exe.py` | 出货 |
+| exe 内容层 | 78 项 0 问题 | `python lang_dev/_verify_exe.py` | 出货 |
 | 克隆同步 | 落后 0 个 | `python lang_dev/_check_tree_sync.py --strict` | 出货 |
 | exe 冒烟 | OFF 11/11、ON 12/12 | `python lang_dev/_smoke_exe.py --arm both` | 出货 |
 | 备份纪律 | 每轮一份源码快照 | 人看 | 改源码时 |
@@ -68,7 +68,7 @@ python lang_dev/check.py --stage full    # 出货前（要 exe） （分钟级�
 
 | 指标 | 当前值 | w/s |
 |---|---|---|
-| 单元自检通过数 | 123 | w |
+| 单元自检通过数 | 139 | w |
 | 归档自检通过数 | 104 | w |
 | 地板守卫阴性对照 | 21 | w |
 | 推送闸门自检 | 18 | w |

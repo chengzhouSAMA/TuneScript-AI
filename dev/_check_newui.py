@@ -68,6 +68,11 @@ def main():
           '必须保留' in tp._STEM_LABEL.get('vocals', '')
           and '不识别' in tp._STEM_LABEL.get('drums', ''),
           tp._STEM_LABEL.get('vocals', '') + ' | ' + tp._STEM_LABEL.get('drums', ''))
+    check('转谱页有「简单/高级模式」单选（高级＝分轨+语种分段）',
+          hasattr(tp, 'mode_var') and tp.mode_var.get() in ('simple', 'advanced'))
+    check('转谱页有谱面置信度着色开关', hasattr(tp, 'conf_var'))
+    check('旧的 sep_var/simple_var 已并入模式单选（不再两处口径）',
+          not hasattr(tp, 'sep_var') and not hasattr(tp, 'simple_var'))
     np_ = shell.pages['netease']
     check('网易云页有 搜索按钮 + 结果表 + 下载按钮',
           hasattr(np_, 'search_btn') and hasattr(np_, 'tv') and hasattr(np_, 'dl_btn'))
@@ -217,6 +222,11 @@ def main():
           '一条都不留时管线会拿人声当伴奏')
     check('勾选对话框里人声与鼓固定禁用（R1/R3 不是可选项）',
           "cb.configure(state='disabled')" in dlg_src and "'vocals', 'drums'" in dlg_src)
+    check('_work 里也不碰 mode_var/conf_var（同样先在主线程读）',
+          'mode_var' not in wk_src and 'conf_var' not in wk_src)
+    check('_work 把高级模式映射成 分轨+语种分段 两开关同开',
+          'use_separation=adv' in wk_src and 'simple_mode=(not adv)' in wk_src
+          and 'lang_seg=adv' in wk_src)
 
     # ask_main：工作线程提问 → 主线程回答，值必须回得来（勾选对话框就靠它）。
     # 这里不手工调 _poll（那会叠加出多条重复的轮询链），页面自己的 120ms 轮询就够。

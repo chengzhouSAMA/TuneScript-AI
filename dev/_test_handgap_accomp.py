@@ -514,6 +514,65 @@ check('对话框取消 → 抛 PipelineCancelled（不是静默按原样继续�
 check('PipelineCancelled 是异常类（能被专门分支接住）',
       issubclass(T.PipelineCancelled, Exception))
 
+# ---------------------------------------------------------------------------
+# 谱面置信度着色（2026-10-01 新增）—— 通道是 predict() 的 note_events amplitude，
+# **不是** velocity（velocity 下游被 _soft_velocity 按左右手重映射成力度层次了）
+# ---------------------------------------------------------------------------
+import inspect as _inspect  # 本块专用；ruff 没选 E402，不需要抑制注释
+
+T._NOTE_CONF.clear()
+T.set_note_conf_color(True)
+check('着色默认开（无覆盖时 conf_color_enabled 为真）', T.conf_color_enabled() is True)
+T.set_note_conf_color(None)
+os.environ.pop("TS_NOTE_CONF_COLOR", None)
+check('TS_NOTE_CONF_COLOR 未设时默认开', T.conf_color_enabled() is True)
+os.environ["TS_NOTE_CONF_COLOR"] = "0"
+check('TS_NOTE_CONF_COLOR=0 时关闭', T.conf_color_enabled() is False)
+os.environ.pop("TS_NOTE_CONF_COLOR", None)
+
+T._conf_record(1.0, 60, 0.20)      # 低
+T._conf_record(2.0, 64, 0.45)      # 中
+T._conf_record(3.0, 67, 0.90)      # 高
+check('低置信 → 红', T.note_conf_color(1.0, 60, 0.6, 0.35) == T.CONF_COLORS["low"])
+check('中置信 → 橙', T.note_conf_color(2.0, 64, 0.6, 0.35) == T.CONF_COLORS["mid"])
+check('高置信 → 不上色（保持黑，谱面照旧干净）',
+      T.note_conf_color(3.0, 67, 0.6, 0.35) is None)
+check('查不到来源 → 蓝（补音/合成/被改写，最可疑的一类）',
+      T.note_conf_color(9.9, 40, 0.6, 0.35) == T.CONF_COLORS["none"])
+check('±一个八度也能查回（R1 会把音搬八度）',
+      T.note_conf_color(1.0, 72, 0.6, 0.35) == T.CONF_COLORS["low"])
+check('同音高起音差 40ms 内算同一个音（碎音合并会微调起音）',
+      T.note_conf_color(1.04, 60, 0.6, 0.35) == T.CONF_COLORS["low"])
+check('起音差超出 60ms 不算（免得张冠李戴）',
+      T.note_conf_color(1.5, 60, 0.6, 0.35) == T.CONF_COLORS["none"])
+T._conf_record(5.0, 60, 1.7)
+check('越界 amplitude 不入表（防脏数据）', T._conf_lookup(5.0, 60) is None)
+
+T.set_note_conf_color(False)
+check('关掉时 _score_colors 返回 None（一条颜色都不写）',
+      T._score_colors([("G", 2, [(0.0, 1.0, 60, 80)])], lambda t: int(t * 8)) is None)
+T.set_note_conf_color(True)
+_cols = T._score_colors([("G", 2, [(1.0, 3.0, 60, 80)])], lambda t: int(t * 8))
+check('_score_colors 覆盖整个时值的槽位（跨小节续段不会掉成蓝）',
+      _cols is not None and all((s, 60) in _cols for s in (8, 10, 23))
+      and (24, 60) not in _cols, '%s' % (sorted(_cols) if _cols else None))
+
+# ---------------------------------------------------------------------------
+# 整曲语种判断（2026-10-01 新增）：默认开，但只报告、不参与取舍
+# ---------------------------------------------------------------------------
+os.environ["TS_LANG_JUDGE"] = "0"
+_judge_off = T.judge_language("不存在.wav", None, None)
+check('TS_LANG_JUDGE=0 → 不判、不加载模型，reason 说明开关',
+      _judge_off.get("ok") is False and _judge_off.get("reason") == "TS_LANG_JUDGE=0",
+      str(_judge_off))
+os.environ.pop("TS_LANG_JUDGE", None)
+_judge_bad = T.judge_language("不存在.wav", None, None)
+check('没有可判音频时不炸，返回 ok=False',
+      _judge_bad.get("ok") is False and "没有可判" in (_judge_bad.get("reason") or ""),
+      str(_judge_bad))
+check('run_pipeline 有 lang_seg 形参（GUI 高级模式用它显式开分段）',
+      "lang_seg" in _inspect.signature(T.run_pipeline).parameters)
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:
