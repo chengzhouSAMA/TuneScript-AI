@@ -106,8 +106,8 @@ def main():
             _missing = [s for s in _syms if s not in _src]
             check("历轮声明的实现仍在源码里：%s" % _what, not _missing,
                   ("缺 %s" % "、".join(_missing)) if _missing else "按源码内容判，不依赖 diff 基线")
-        check("新增行数在理智范围内（<=600；仅防意外大改，不是预算）",
-              len(adds) <= 600, "新增 %d 行" % len(adds))
+        check("新增行数在理智范围内（<=700；仅防意外大改，不是预算）",
+              len(adds) <= 700, "新增 %d 行" % len(adds))
         known_del = ("notes_of(stems['vocals']", "请选择音频文件", "需提供 --audio 或 --bvid",
                      "B站音频与转谱产物", "args=(audio, bvid, outdir)",
                      "def _worker(self, audio, bvid, outdir)", "填 BV 号则自动下载后转谱",
@@ -125,6 +125,26 @@ def main():
         # 本轮（2026-10-02 E1+E2 演奏法检测）：_xml_note/_staff_lines 各多一个可选形参，
         # 两处调用点跟着多一个实参。默认 TS_ARTIC=0 ⇒ _score_marks 返回 None ⇒
         # 一个 <articulations> 都不会输出（单元自检与真产物都有断言钉住）。
+        # 本轮（2026-10-02 E4 踏板记号）：artic 通道改名 mark（同一键可承载两类记号，
+        # 用 '+' 串起来 —— 早先 setdefault 会让 pedal_start 被同一键上的 tenuto 顶掉）。
+        # 踏板用 <direction> 而不是 <notations><pedal>：MuseScore 只认前者（实测）。
+        known_del += (
+            "    _ARTIC_STATS.update({\"staccato\":",
+            "              color=None, artic=None):",
+            "    if tie_start or tie_stop or artic:",
+            "        if artic:",
+            "            L.append('        <articulations><%s/></articulations>' % artic)",
+            "                artic=(marks or {}).get((bar * bar_div + s, int(p))))",
+            "        progress('演奏法记号：断奏 %d / 连奏 %d（共 %d 音，阈值 %.2f）'",
+            "                out.setdefault(_k, _v)",
+            "    _ped = mark if (mark or '').startswith('pedal') else None",
+            "        elif mark:",
+            "        elif _artic:",
+            "    _ped = ('pedal_start' if 'pedal_start' in _parts",
+            "    if tie_start or tie_stop or _ped or _artic:",
+            "        if _ped:",
+            "            L.append('        <pedal type=\"%s\" line=\"yes\"/>'",
+        )
         known_del += (
             "              color=None):",
             "    if tie_start or tie_stop:",

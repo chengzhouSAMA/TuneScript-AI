@@ -2770,6 +2770,7 @@ def _build_hand(name, notes, add_pedal=True):
         for s, e in regions:
             inst.control_changes.append(ControlChange(number=64, value=75, time=s))
             inst.control_changes.append(ControlChange(number=64, value=0, time=e))
+        _PEDAL[:] = regions          # E4：同一份区间也拿去写谱面踏板记号
         # 排序控制事件：同时间点先踩下再抬起，避免时序错乱
         inst.control_changes.sort(key=lambda cc: (cc.time, 0 if cc.value > 0 else 1))
     return inst
@@ -2797,6 +2798,38 @@ def _pitch_to_musicxml(pitch):
 ENV_ARTIC = "TS_ARTIC"                        # "1" 打开；默认 0 = 出厂谱面逐字节不变
 ENV_ARTIC_RATIO = "TS_ARTIC_STACCATO_RATIO"   # 断奏阈值（发音时长/间隔），默认 0.60
 ENV_ARTIC_MIN_GAP = "TS_ARTIC_MIN_GAP"        # 间隔小于它就不判（同和弦/密集经过音）
+ENV_ARTIC_PEDAL = "TS_ARTIC_PEDAL"            # "0" 可单独关掉踏板记号
+
+_PEDAL = []         # E4：`_build_hand` 算出的踏板区间 [(t_on, t_off), ...]（CC64 的来源）
+
+
+def pedal_enabled():
+    """踏板记号：跟随总开关，可用 TS_ARTIC_PEDAL=0 单独关。"""
+    return artic_enabled() and os.environ.get(ENV_ARTIC_PEDAL, "1") != "0"
+
+
+def _pedal_marks(notes, to_div):
+    """E4：把踏板区间挂到**最近的左手音起音**上（±0.30s 内），挂不上就不标。
+
+    为什么是"挂到音上"：MusicXML 的踏板记号可以挂在 note 的 <notations> 里
+    （`<pedal type="start|stop" line="yes"/>`），这比用 <direction>+<offset>
+    去对时间简单得多，也正好复用 artic 那条 marks 通道。
+    """
+    out = {}
+    if not _PEDAL or not notes:
+        return out
+    onsets = [(round(s, 3), int(p)) for s, _e, p, _v in notes]
+    for rs, re_ in _PEDAL:
+        for t, kind in ((rs, "pedal_start"), (re_, "pedal_stop")):
+            best, bd = None, 0.31
+            for ns, npo in onsets:
+                d = abs(ns - t)
+                if d < bd:
+                    best, bd = (ns, npo), d
+            if best is not None:
+                out[(to_div(best[0]), best[1])] = kind
+    return out
+
 
 _BEND = {}          # (round(start,3), pitch) -> |pitch_bend| 最大者（E5/E6 的原料）
 _ARTIC_STATS = {}   # 最近一次写谱的记号统计（日志用）
@@ -2878,7 +2911,17 @@ def _score_marks(hands, to_div):
     out = {}
     for (t, p), m in art.items():
         out[(to_div(t), int(p))] = m
-    _ARTIC_STATS.update({"staccato": sum(1 for m in out.values() if m == "staccato"),
+    _pn = 0
+    if pedal_enabled():
+        for _sign, _line, _notes in hands:
+            for _k, _v in _pedal_marks(_notes, to_div).items():
+                # ⚠️ 同一个音可能**既要** articulation **又要**踏板记号：
+                # 早先这里写的是 setdefault，结果 pedal_start 被同一键上的 tenuto
+                # 顶掉（合成用例只剩 stop、MuseScore 就解析不到 Pedal）。用 '+' 串起来。
+                out[_k] = (out[_k] + '+' + _v) if _k in out else _v
+                _pn += 1
+    _ARTIC_STATS.update({"pedal": _pn,
+                         "staccato": sum(1 for m in out.values() if m == "staccato"),
                          "tenuto": sum(1 for m in out.values() if m == "tenuto"),
                          "total_notes": len(raw),
                          "ratio": _artic_float(ENV_ARTIC_RATIO, 0.60)})
@@ -3021,7 +3064,7 @@ def _score_colors(hands, to_div):
 
 
 def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=False,
-              color=None, artic=None):
+              color=None, mark=None):
     L = ['      <note>']
     if color:
         L[0] = '      <note color="%s">' % color
@@ -3043,14 +3086,17 @@ def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=F
         L.append('        <tie type="stop"/>')
     L.append(f'        <voice>{voice}</voice>')
     L.append(f'        <staff>{staff}</staff>')
-    if tie_start or tie_stop or artic:
+    _parts = (mark or '').split('+')
+    _artic = next((p for p in _parts if p in ('staccato', 'tenuto')), None)
+    if tie_start or tie_stop or _artic:
         L.append('        <notations>')
         if tie_start:
             L.append('          <tied type="start"/>')
         if tie_stop:
             L.append('          <tied type="stop"/>')
-        if artic:
-            L.append('        <articulations><%s/></articulations>' % artic)
+        if _artic:
+            # 注意是 if 不是 elif：同一个音可以同时有踏板与断/连奏记号
+            L.append('        <articulations><%s/></articulations>' % _artic)
         L.append('        </notations>')
     L.append('      </note>')
     return L
@@ -3063,6 +3109,21 @@ def _xml_rest(dur, voice, staff):
             f'        <voice>{voice}</voice>',
             f'        <staff>{staff}</staff>',
             '      </note>']
+
+
+def _xml_pedal_dir(token, staff):
+    """踏板记号：用 `<direction>` 而不是 `<notations><pedal>`。
+
+    2026-10-02 实测：MuseScore 4 **不认** `<notations><pedal type="start"/>`
+    （同一块里的 `<tenuto/>` 它认 —— 所以不是块本身的问题），改用 2.0 就有的
+    `<direction><direction-type><pedal>`。好处是不需要 `<offset>`：
+    `<direction>` 在音符流里的位置**就是**它的时间点。
+    """
+    return ['      <direction placement="below">',
+            '        <direction-type><pedal type="%s" line="yes"/></direction-type>'
+            % ('start' if token == 'pedal_start' else 'stop'),
+            '        <staff>%d</staff>' % int(staff),
+            '      </direction>']
 
 
 def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True, colors=None,
@@ -3105,12 +3166,15 @@ def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True, colors=None,
             out += _xml_rest(end - sl, voice, staff)
             continue
         for k, (p, s, e, ts, te) in enumerate(members):
+            for _tk in (marks or {}).get((bar * bar_div + s, int(p)), '').split('+'):
+                if _tk.startswith('pedal_'):
+                    out += _xml_pedal_dir(_tk, staff)
             out += _xml_note(
                 p, end - sl, voice, staff, chord=(k > 0),
                 tie_start=with_ties and (e > end or ts),
                 tie_stop=with_ties and (s < sl or te),
                 color=(colors or {}).get((bar * bar_div + s, int(p))),
-                artic=(marks or {}).get((bar * bar_div + s, int(p))))
+                mark=(marks or {}).get((bar * bar_div + s, int(p))))
     return out
 
 
@@ -3771,9 +3835,10 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
     progress('正在生成左右手大谱表…')
     write_grand_staff_xml(left, right, xml_path, bpm=tempo, n_bars=n_bars, splice=splice)
     if _ARTIC_STATS:
-        progress('演奏法记号：断奏 %d / 连奏 %d（共 %d 音，阈值 %.2f）'
+        progress('演奏法记号：断奏 %d / 连奏 %d / 踏板 %d（共 %d 音，阈值 %.2f）'
                  % (_ARTIC_STATS.get('staccato', 0), _ARTIC_STATS.get('tenuto', 0),
-                    _ARTIC_STATS.get('total_notes', 0), _ARTIC_STATS.get('ratio', 0.6)))
+                    _ARTIC_STATS.get('pedal', 0), _ARTIC_STATS.get('total_notes', 0),
+                    _ARTIC_STATS.get('ratio', 0.6)))
     pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path, left, right, tempo,
                                  base, out_dir, progress, n_bars=n_bars, splice=splice)
     try:

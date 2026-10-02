@@ -632,6 +632,32 @@ check('E2：间隔太近不判（同和弦/密集走句不该标成一片断奏�
 check('E2：中间地带（0.60~0.92）不标 —— precision 优先，宁可少标',
       T.detect_articulations([(0.0, 0.40, 60, 80), (0.5, 1.0, 62, 80)]).get((0.0, 60)) is None)
 
+# ---------------------------------------------------------------------------
+# E4 踏板记号（2026-10-02）：把 `_build_hand` 已经算出的 CC64 区间写成谱面记号
+# ---------------------------------------------------------------------------
+os.environ.pop("TS_ARTIC", None)
+check('踏板默认关（跟随总开关 TS_ARTIC）', T.pedal_enabled() is False)
+os.environ["TS_ARTIC"] = "1"
+check('TS_ARTIC=1 时踏板开', T.pedal_enabled() is True)
+os.environ["TS_ARTIC_PEDAL"] = "0"
+check('TS_ARTIC_PEDAL=0 可单独关掉踏板（其余记号不受影响）',
+      T.pedal_enabled() is False and T.artic_enabled() is True)
+os.environ.pop("TS_ARTIC_PEDAL", None)
+T._PEDAL[:] = [(0.0, 1.0), (2.0, 3.0)]
+_pm = T._pedal_marks([(0.0, 1.0, 48, 80), (1.0, 2.0, 50, 80), (2.05, 3.0, 52, 80)],
+                     lambda t: int(round(t * 8)))
+check('E4：区间起/止挂到最近的音起音上（0.05s 内也算最近）',
+      _pm == {(0, 48): 'pedal_start', (8, 50): 'pedal_stop', (16, 52): 'pedal_start'},
+      str(_pm))
+check('E4：挂不上（差 >0.30s）就不标 —— 宁可少标',
+      T._pedal_marks([(9.0, 9.5, 60, 80)], lambda t: int(round(t * 8))) == {})
+check('E4：用 <direction> 形式而不是 <notations><pedal>'
+      '（2026-10-02 实测 MuseScore 只认前者）',
+      '<direction-type><pedal type="start" line="yes"/>' in
+      "\n".join(T._xml_pedal_dir('pedal_start', 1)))
+T._PEDAL[:] = []
+os.environ.pop("TS_ARTIC", None)
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:

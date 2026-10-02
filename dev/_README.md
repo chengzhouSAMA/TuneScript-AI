@@ -3628,3 +3628,51 @@ GUI 单选 `mode_var`（默认 **advanced**）：
 单元自检 150 → **159**（+9）；`_selfcheck` **104/104**（登记了 5 行改写；累计护栏 1600→1900，
 **删除护栏 240 没动**）；`--stage full` 见提交信息。E1/E2 都是 `TS_ARTIC=0` 默认关，
 所以**出厂产物逐字节不变**（有单元断言钉住）。
+
+## 155. E4：踏板记号写进谱面（2026-10-02）
+
+### 155.1 白捡在哪
+
+踏板数据**早就存在**：`_build_hand(..., add_pedal=True)`（`:2751`，只给左手）把
+"≥0.30s 的长音、间隙 ≤0.25s 就合并成一个踏板区间"算成 `regions`，再写成 CC64。
+**XML 里一个 pedal 元素都没有** —— 所以这一轮不是"检测"，是**把已有数据写进谱面**。
+
+### 155.2 两个实现要点（都是踩出来的）
+
+**① 一个音可能同时要 articulation 和踏板记号 —— 早先用 `setdefault` 会顶掉一个。**
+第一次合成的用例只有 `<pedal type="stop"/>`、没有 start：因为那个音的键上已经有 `tenuto`
+（它同时满足连奏判据），`setdefault` 就把 `pedal_start` 丢了；MuseScore 因此只看到一个孤儿 stop。
+修法：同一个键上的多个记号用 `+` 串起来（`'tenuto+pedal_start'`），`_xml_note` 按 token 分派。
+
+**② MuseScore 4 不认 `<notations><pedal>`，只认 `<direction><direction-type><pedal>`。**
+这又是 `--score-elements` 抓出来的：
+
+| 写法 | `--score-elements` 结果 |
+|---|---|
+| `<note><notations><pedal type="start" line="yes"/></notations></note>` | `Pedal: 0`（同一块里的 `<tenuto/>` 它认 ⇒ 不是块本身的问题） |
+| `<direction placement="below"><direction-type><pedal type="start" line="yes"/></direction-type><staff>1</staff></direction>` | **`Pedal: 1`** ✓ |
+
+好消息是 `<direction>` 形式**不需要 `<offset>`**：它在音符流里的位置**就是**它的时间点，
+所以 `_staff_lines` 在带踏板记号的音**之前**把它插进去即可。
+
+### 155.3 证明（四判据）
+
+| 判据 | 结果 |
+|---|---|
+| ① 合成用例 | `<pedal type="start">`×1 + `type="stop"`×1 |
+| ② `TS_ARTIC_PEDAL=0` | 0 个 pedal（其余记号不受影响） |
+| ③ **MuseScore 解析** | `--score-elements` → **`Pedal: 1`** |
+| ④ **真管线** | `_PEDAL` 4 个区间来自真实 `_build_hand`；产物 XML **13 个 `<pedal`**；日志「断奏 26 / 连奏 23 / **踏板 12**（共 103 音）」 |
+
+单元自检 159 → **165**（+6：开关两条 + 就近挂载 + 挂不上不标 + direction 形式钉住）。
+
+### 155.4 两个"元"问题（写给下一个 AI）
+
+1. **我在同一个坑里摔了两次**：Python 字符串里写了 ASCII 双引号
+   （`print("  ✓ 写下"单轮护栏在量 6 轮"这件事")`）⇒ `SyntaxError`。两次都发生在**临时补丁脚本**里，
+   两次都是"中文里嵌引号"。**教训：中文串里要用「」或单引号，别用 `"`。**
+2. **`_selfcheck` 的"单轮"护栏其实在量 6 轮的窗口**：基线一直是 `pre_studio`，之后累积了
+   分轨勾选 / 三件功能 / MuseScore 按钮 / P1 / E1+E2 / E4 六轮，所以"单轮 700 行"这个数
+   已经不是单轮了。真要让"单轮"有意义，**该建新基线** —— 但那两条按 diff 判身份的断言
+   （演奏级编配）会因基线前移而失效，所以建基线必须连着改那两条（§150.4、F3 那条教训）。
+   本轮先抬到 700 保证不红，并把这笔账记在这里。
