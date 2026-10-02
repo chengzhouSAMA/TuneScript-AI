@@ -267,9 +267,9 @@ Remove-Item Env:\TS_PUSH_KEY
 
 | | 值 |
 |---|---|
-| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.79 MB**（含「在 MuseScore 中打开」按钮 + P1 记谱网格 `TS_DIVISIONS`）|
-| sha256 | `E53B7EBF3355E5B0A047B4AC905988C9B900E6D0724A989EF37069CB5B6E6060` |
-| 上一版备份 | 更早一版 `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`）；`_backup_pre_stempick_…exe`（550.24 MB，`16E5E2D7…4FFD`）；`_backup_pre_confjudge_…exe` 与 `_backup_pre_logfix_…exe`（均 547.79 MB，`4C35DCD8…`）、`_backup_pre_msbutton_…exe`（547.79 MB，`C5824B51…`）、`_backup_pre_p1grid_…exe`（547.79 MB，`A9562AFD…`） |
+| 出货 exe | `dist/TuneScript AI V0.5.1.exe`，**547.79 MB**（含「在 MuseScore 中打开」按钮 + P1 记谱网格 `TS_DIVISIONS` + E1/E2 演奏法检测 `TS_ARTIC`，后者默认关）|
+| sha256 | `E6A5177B0E04B5FFDB536B88E5D53890A2248AA194BB1FC241D4B2EFB11E0B90` |
+| 上一版备份 | 更早一版 `dist/_backup_TuneScript AI V0.5.1.exe`（547.8 MB，`D3DEDF56…`）；`_backup_pre_stempick_…exe`（550.24 MB，`16E5E2D7…4FFD`）；`_backup_pre_confjudge_…exe` 与 `_backup_pre_logfix_…exe`（均 547.79 MB，`4C35DCD8…`）、`_backup_pre_msbutton_…exe`（547.79 MB，`C5824B51…`）、`_backup_pre_p1grid_…exe`（547.79 MB，`A9562AFD…`）、`_backup_pre_artic_…exe`（547.79 MB，`E53B7EBF…`） |
 | 桌面快捷方式 | `C:\Users\35968\Desktop\TuneScript AI V0.5.1.lnk` |
 | 验收 | fast 7/7、task 13 项 **12 绿**、full 16 项 **15 绿** —— 唯一红是地板守卫 F6 误报（见 §5）；`_verify_exe` **79 项 0 问题**；冒烟 OFF 11/11 + ON 12/12 |
 | 远端 main | `232d38c` |

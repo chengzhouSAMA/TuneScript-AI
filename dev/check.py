@@ -36,7 +36,7 @@ CHECKS = [
      [PY, 'lang_dev/_check_tree_sync.py'], 15),
     ('persona', 'fast', '已发布文件无角色化称呼（含词表自检）',
      [PY, 'lang_dev/_strip_persona.py', '--check', '--selftest'], 10),
-    ('unit', 'fast', '核心编排单元自检 150 项',
+    ('unit', 'fast', '核心编排单元自检 159 项',
      [PY, 'lang_dev/_test_handgap_accomp.py'], 20),
     ('fidelity', 'fast', '音符解码与谱面保真（含阴性对照）',
      [PY, 'lang_dev/_test_fidelity.py'], 20),

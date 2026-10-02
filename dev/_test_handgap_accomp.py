@@ -609,6 +609,29 @@ if _keep is None:
 else:
     os.environ["TS_DIVISIONS"] = _keep
 
+# ---------------------------------------------------------------------------
+# E1 + E2 演奏法检测（2026-10-02）—— 统一开关 TS_ARTIC，默认关
+# ---------------------------------------------------------------------------
+os.environ.pop("TS_ARTIC", None)
+check('TS_ARTIC 默认关（不写任何演奏法记号，出厂谱面不变）', T.artic_enabled() is False)
+os.environ["TS_ARTIC"] = "1"
+check('TS_ARTIC=1 时开启', T.artic_enabled() is True)
+os.environ.pop("TS_ARTIC", None)
+T._BEND.clear()
+T._bend_record_events([(0.5, 1.0, 60, 0.90, -0.40), (0.5, 1.0, 60, 0.10, 0.05)])
+check('E1：同一 (起音,音高) 只留 |pitch_bend| 最大者', T.bend_max(0.5, 60) == 0.40,
+      'bend=%s' % T.bend_max(0.5, 60))
+check('E1：没记录的音返回 None（不是 0）', T.bend_max(9.9, 99) is None)
+_art = T.detect_articulations([(0.0, 0.10, 60, 80), (0.5, 1.48, 62, 80),
+                               (1.5, 1.60, 64, 80)])
+check('E2：短促音（时长/间隔 0.20）→ 断奏', _art.get((0.0, 60)) == 'staccato', str(_art))
+check('E2：几乎贴着下一音（0.98）→ 连奏', _art.get((0.5, 62)) == 'tenuto')
+check('E2：最后一个起音不判（没有下一个音可比）', (1.5, 64) not in _art)
+check('E2：间隔太近不判（同和弦/密集走句不该标成一片断奏）',
+      T.detect_articulations([(0.0, 0.05, 60, 80), (0.10, 0.20, 62, 80)]) == {})
+check('E2：中间地带（0.60~0.92）不标 —— precision 优先，宁可少标',
+      T.detect_articulations([(0.0, 0.40, 60, 80), (0.5, 1.0, 62, 80)]).get((0.0, 60)) is None)
+
 print('\n=== 汇总：%d 项，%d 通过，%d 失败 ===' % (len(OK) + len(BAD), len(OK), len(BAD)))
 if BAD:
     for b in BAD:

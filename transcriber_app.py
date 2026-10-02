@@ -635,6 +635,7 @@ def transcribe_notes(wav_path, model, progress, label="音符", min_len=150):
         for n in inst.notes:
             notes.append((n.start, n.end, n.pitch, n.velocity))
     _conf_record_events(_notes)
+    _bend_record_events(_notes)
     return notes
 
 
@@ -2788,6 +2789,103 @@ def _pitch_to_musicxml(pitch):
 
 
 # --------------------------------------------------------------------------
+# 演奏法检测（E1 + E2，2026-10-02）—— 统一开关 TS_ARTIC，**默认关**
+# --------------------------------------------------------------------------
+# 全链路都默认关：演奏法记号会**直接改可见谱面**，而这类判断没有客观真值
+# （没人标注过这些歌该怎么标），所以按"precision 优先"做：宁可少标。
+# 唯一的硬判据是负面对照 —— 慢歌/连奏曲上断奏数应≈0，强节拍曲上应显著非 0。
+ENV_ARTIC = "TS_ARTIC"                        # "1" 打开；默认 0 = 出厂谱面逐字节不变
+ENV_ARTIC_RATIO = "TS_ARTIC_STACCATO_RATIO"   # 断奏阈值（发音时长/间隔），默认 0.60
+ENV_ARTIC_MIN_GAP = "TS_ARTIC_MIN_GAP"        # 间隔小于它就不判（同和弦/密集经过音）
+
+_BEND = {}          # (round(start,3), pitch) -> |pitch_bend| 最大者（E5/E6 的原料）
+_ARTIC_STATS = {}   # 最近一次写谱的记号统计（日志用）
+
+
+def artic_enabled():
+    return os.environ.get(ENV_ARTIC, "0") == "1"
+
+
+def _artic_float(name, default):
+    try:
+        return float(os.environ.get(name) or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _bend_record_events(note_events):
+    """E1：把 `predict()` 的 pitch_bend（note_events 第 5 个字段）留下来。
+
+    这是滑音/颤音/揉弦**唯一现成的数据源** —— 此前它随着 `_notes` 一起被丢掉，
+    所以那三类记号连"原料"都没有。这里只采集，不动任何行为。
+    """
+    for ev in (note_events or ()):
+        try:
+            key = (round(float(ev[0]), 3), int(ev[2]))
+            b = float(ev[4])
+        except (TypeError, IndexError, ValueError):
+            continue
+        if not (key in _BEND and abs(_BEND[key]) >= abs(b)):
+            _BEND[key] = b
+
+
+def bend_max(start, pitch):
+    """查该音的 |pitch_bend|（无记录返回 None）。E5/E6 会用。"""
+    v = _BEND.get((round(float(start), 3), int(pitch)))
+    return None if v is None else abs(v)
+
+
+def detect_articulations(notes):
+    """E2：给每个音判 staccato / tenuto（返回 {(round(start,3), pitch): 记号}）。
+
+    判据（precision 优先，宁可少标）：
+      · 与**下一个起音**的间隔 < min_gap（默认 0.18s）→ 不判（同和弦、密集经过音、
+        装饰音都会被排除，避免把正常快速走句标成一片断奏）
+      · ratio = 本音时长 ÷ 该间隔：< 阈值(0.60) → 断奏；≥ 0.92 → 连奏（几乎贴着下一音）
+      · 中间地带（0.60~0.92）**不标** —— 那是最常见的"普通演奏"，标了反而是噪声
+    """
+    out = {}
+    if not notes:
+        return out
+    min_gap = _artic_float(ENV_ARTIC_MIN_GAP, 0.18)
+    ratio = _artic_float(ENV_ARTIC_RATIO, 0.60)
+    onsets = sorted({round(s, 3) for s, _e, _p, _v in notes})
+    nxt = {t: (onsets[i + 1] if i + 1 < len(onsets) else None)
+           for i, t in enumerate(onsets)}
+    for s, e, p, _v in notes:
+        t = round(s, 3)
+        n = nxt.get(t)
+        if n is None:
+            continue
+        gap = n - t
+        if gap < min_gap:
+            continue
+        r = (e - s) / gap
+        if r < ratio:
+            out[(t, int(p))] = "staccato"
+        elif r >= 0.92:
+            out[(t, int(p))] = "tenuto"
+    return out
+
+
+def _score_marks(hands, to_div):
+    """演奏法记号 → {(绝对槽位, 音高): 'staccato'|'tenuto'}；关掉时返回 None。"""
+    _ARTIC_STATS.clear()
+    if not artic_enabled():
+        return None
+    raw = [(s, e, p, v) for _sign, _line, notes in hands for (s, e, p, v) in notes]
+    art = detect_articulations(raw)
+    out = {}
+    for (t, p), m in art.items():
+        out[(to_div(t), int(p))] = m
+    _ARTIC_STATS.update({"staccato": sum(1 for m in out.values() if m == "staccato"),
+                         "tenuto": sum(1 for m in out.values() if m == "tenuto"),
+                         "total_notes": len(raw),
+                         "ratio": _artic_float(ENV_ARTIC_RATIO, 0.60)})
+    return out
+
+
+# --------------------------------------------------------------------------
 # 谱面置信度着色（校对导航）
 # --------------------------------------------------------------------------
 # 通道：`transcribe_notes` 识别时把 `predict()` 返回的 note_events 里那个
@@ -2923,7 +3021,7 @@ def _score_colors(hands, to_div):
 
 
 def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=False,
-              color=None):
+              color=None, artic=None):
     L = ['      <note>']
     if color:
         L[0] = '      <note color="%s">' % color
@@ -2945,12 +3043,14 @@ def _xml_note(pitch, dur, voice, staff, chord=False, tie_start=False, tie_stop=F
         L.append('        <tie type="stop"/>')
     L.append(f'        <voice>{voice}</voice>')
     L.append(f'        <staff>{staff}</staff>')
-    if tie_start or tie_stop:
+    if tie_start or tie_stop or artic:
         L.append('        <notations>')
         if tie_start:
             L.append('          <tied type="start"/>')
         if tie_stop:
             L.append('          <tied type="stop"/>')
+        if artic:
+            L.append('        <articulations><%s/></articulations>' % artic)
         L.append('        </notations>')
     L.append('      </note>')
     return L
@@ -2965,7 +3065,8 @@ def _xml_rest(dur, voice, staff):
             '      </note>']
 
 
-def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True, colors=None):
+def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True, colors=None,
+                 marks=None):
     """沿起止边界切分和弦，用延音线保留各音的独立时值。
 
     notes 元素为 (slot, pitch, dur, tie_start, tie_stop)，其中跨小节的
@@ -3008,7 +3109,8 @@ def _staff_lines(notes, bar, bar_div, voice, staff, with_ties=True, colors=None)
                 p, end - sl, voice, staff, chord=(k > 0),
                 tie_start=with_ties and (e > end or ts),
                 tie_stop=with_ties and (s < sl or te),
-                color=(colors or {}).get((bar * bar_div + s, int(p))))
+                color=(colors or {}).get((bar * bar_div + s, int(p))),
+                artic=(marks or {}).get((bar * bar_div + s, int(p))))
     return out
 
 
@@ -3107,6 +3209,7 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
 
     # 谱面置信度着色：整曲只算一次，按 (绝对槽位, 音高) 交给 _staff_lines 查
     colors = _score_colors(hands, to_div)
+    marks = _score_marks(hands, to_div)
 
     total_div = max(
         [max(to_div(s) + 1, to_div(e))
@@ -3217,10 +3320,10 @@ def build_score_xml(hands, bpm=120.0, with_ties=True, n_bars=None, splice=None):
             if splice and bar in splice and i in splice[bar]:
                 # 参考谱拼接小节: 直接按 16 分槽位写入
                 X += _staff_lines(splice[bar][i], bar, bar_div, i, i,
-                                  with_ties=with_ties, colors=colors)
+                                  with_ties=with_ties, colors=colors, marks=marks)
             else:
                 X += _staff_lines(segs, bar, bar_div, i, i,
-                                  with_ties=with_ties, colors=colors)
+                                  with_ties=with_ties, colors=colors, marks=marks)
         X.append('    </measure>')
     X.append('  </part>')
     X.append('</score-partwise>')
@@ -3667,6 +3770,10 @@ def run_pipeline(audio_path, out_dir, model_path, ms_exe, ffmpeg, progress,
     midi_data.write(midi_path)
     progress('正在生成左右手大谱表…')
     write_grand_staff_xml(left, right, xml_path, bpm=tempo, n_bars=n_bars, splice=splice)
+    if _ARTIC_STATS:
+        progress('演奏法记号：断奏 %d / 连奏 %d（共 %d 音，阈值 %.2f）'
+                 % (_ARTIC_STATS.get('staccato', 0), _ARTIC_STATS.get('tenuto', 0),
+                    _ARTIC_STATS.get('total_notes', 0), _ARTIC_STATS.get('ratio', 0.6)))
     pdf_paths = render_score_pdf(ms_exe, xml_path, pdf_path, left, right, tempo,
                                  base, out_dir, progress, n_bars=n_bars, splice=splice)
     try:
